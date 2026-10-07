@@ -1,0 +1,17 @@
+{
+  "lite": {
+    "ratio": 1.0,
+    "pass": 0.9412,
+    "explicit_open": 0.75
+  },
+  "full": {
+    "ratio": 0.8974,
+    "pass": 0.9706,
+    "explicit_open": 0.75
+  },
+  "ultra": {
+    "ratio": 0.9282,
+    "pass": 0.9706,
+    "explicit_open": 1.0
+  }
+}

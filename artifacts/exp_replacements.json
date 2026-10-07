@@ -1,0 +1,111 @@
+{
+  "rows": [
+    {
+      "need": "count things",
+      "use": "collections.Counter",
+      "holds when": "always",
+      "test": "PASSED",
+      "evidence": "most_common(1) == [('a', 3)]"
+    },
+    {
+      "need": "dedupe, keep order",
+      "use": "list(dict.fromkeys(xs))",
+      "holds when": "items are hashable",
+      "test": "PASSED",
+      "evidence": "[3,1,3,2,1] -> [3,1,2]"
+    },
+    {
+      "need": "case-insensitive match",
+      "use": "s.casefold()",
+      "holds when": "matching, not display",
+      "test": "PASSED",
+      "evidence": "casefold matches Strasse; lower does not"
+    },
+    {
+      "need": "memoise a pure function",
+      "use": "functools.cache",
+      "holds when": "arguments are hashable",
+      "test": "PASSED",
+      "evidence": "body ran once for two calls"
+    },
+    {
+      "need": "money arithmetic",
+      "use": "decimal.Decimal",
+      "holds when": "values are money",
+      "test": "PASSED",
+      "evidence": "Decimal: 0.1 + 0.2 == 0.3; float: it does not"
+    },
+    {
+      "need": "local time across DST",
+      "use": "zoneinfo.ZoneInfo",
+      "holds when": "the zone has DST rules",
+      "test": "PASSED",
+      "evidence": "00:30 UTC -> 00:30 GMT, 01:30 UTC -> 02:30 BST"
+    },
+    {
+      "need": "parse ISO dates",
+      "use": "date.fromisoformat",
+      "holds when": "input is ISO 8601",
+      "test": "PASSED",
+      "evidence": "2026-03-07 parsed"
+    },
+    {
+      "need": "deep copy",
+      "use": "copy.deepcopy",
+      "holds when": "objects are copyable",
+      "test": "PASSED",
+      "evidence": "nested change did not leak back"
+    },
+    {
+      "need": "constant-time compare",
+      "use": "hmac.compare_digest",
+      "holds when": "comparing secrets",
+      "test": "PASSED",
+      "evidence": "equal and unequal"
+    },
+    {
+      "need": "escape for HTML",
+      "use": "html.escape",
+      "holds when": "text goes into HTML",
+      "test": "PASSED",
+      "evidence": "tags and quotes escaped"
+    },
+    {
+      "need": "validate an IPv4 address",
+      "use": "ipaddress.IPv4Address",
+      "holds when": "IPv4 only, strictly",
+      "test": "PASSED",
+      "evidence": "rejects 256.x, leading zeros and a trailing newline"
+    },
+    {
+      "need": "split into batches",
+      "use": "itertools.batched",
+      "holds when": "the project targets Python 3.12+",
+      "test": "PASSED",
+      "evidence": "7 items -> 3 batches, remainder kept"
+    },
+    {
+      "need": "unique rows in a table",
+      "use": "a UNIQUE constraint",
+      "holds when": "the data lives in a database",
+      "test": "PASSED",
+      "evidence": "the database refused the duplicate"
+    },
+    {
+      "need": "merge nested config",
+      "use": "a | b",
+      "holds when": "-",
+      "test": "WRONG",
+      "evidence": "a | b -> {'db': {'port': 2}}  (host lost: | is shallow)"
+    },
+    {
+      "need": "validate an email address",
+      "use": "email.utils.parseaddr",
+      "holds when": "-",
+      "test": "WRONG",
+      "evidence": "parseaddr('@missing-local.com') -> '@missing-local.com': a parser, not a validator"
+    }
+  ],
+  "passed": 13,
+  "wrong": 2
+}

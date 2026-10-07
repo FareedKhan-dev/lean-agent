@@ -1,0 +1,14 @@
+{
+  "id": "op-md-toc",
+  "title": "A table of contents for a README",
+  "category": "open",
+  "split": "held-out",
+  "axis": "quality",
+  "rung": 7,
+  "entry": "toc.py",
+  "requirements": [],
+  "python_target": "3.12",
+  "prompt": "Write toc.py: `python toc.py README.md` prints a table of contents for a Markdown file, as a nested bullet list of links to its headings, ready to paste at the top of the file on GitHub. Leave out the document title (the # heading).",
+  "notes": "Open scope: a loop with one regex, a code-block flag and GitHub's anchor rule, about twenty lines. Room to over-build: a Markdown scanner, slug strategies, output options. The lazy-wrong version lists '## ...' lines inside code blocks as headings, and gets the anchors of punctuated and repeated headings wrong.",
+  "extension": "Add `--max-level N` to leave out headings deeper than level N."
+}

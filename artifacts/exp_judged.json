@@ -1,0 +1,33 @@
+{
+  "valid": true,
+  "diff": -0.0588,
+  "lo": -0.1471,
+  "hi": 0.0221,
+  "rho": 0.4212,
+  "episode_kappa": 0.311,
+  "off": {
+    "bloat": 0.1618,
+    "heavy": 0.0,
+    "complete": 0.9015
+  },
+  "terse": {
+    "bloat": 0.1103,
+    "heavy": 0.0147,
+    "complete": 0.9403
+  },
+  "slogan": {
+    "bloat": 0.1324,
+    "heavy": 0.0,
+    "complete": 0.9328
+  },
+  "rules": {
+    "bloat": 0.1324,
+    "heavy": 0.0,
+    "complete": 0.9318
+  },
+  "full": {
+    "bloat": 0.1029,
+    "heavy": 0.0,
+    "complete": 0.9167
+  }
+}

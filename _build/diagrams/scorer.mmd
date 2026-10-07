@@ -1,0 +1,10 @@
+flowchart TB
+    %%STYLES%%
+    ws["📁 <b>a workspace</b><br/>after the agent finished"]:::grey --> snap["📸 <b>snapshot</b><br/>every text file, harness files left out"]:::host
+    snap --> key{"🔑 <b>scored before?</b><br/>same files · task · suite · fence"}:::gold
+    key -- "yes" --> hit["🧾 <b>the same record</b><br/>straight from the cache"]:::plugin
+    key -- "no" --> fresh["🧼 <b>a fresh folder</b><br/>the files + hidden test + test kit + the seed"]:::host
+    fresh --> run["🚧 <b>hidden test, fenced</b>"]:::host
+    run --> v["⚖️ <b>verdicts</b><br/>correct · safe · quality<br/>a changed protected file is never correct"]:::lab
+    v --> m["📏 <b>meter · shapes · guards</b><br/>what the change added"]:::lab
+    m --> rec["🧾 <b>one record</b><br/>cached by fingerprint"]:::plugin

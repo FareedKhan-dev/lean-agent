@@ -1,0 +1,22 @@
+{
+  "terse": {
+    "extra_tokens": -3270.0,
+    "lines_saved": 1.0,
+    "tokens_per_line": -3270.0
+  },
+  "slogan": {
+    "extra_tokens": -1820.5,
+    "lines_saved": 1.0,
+    "tokens_per_line": -1820.5
+  },
+  "rules": {
+    "extra_tokens": 13643.0,
+    "lines_saved": 1.0,
+    "tokens_per_line": 13643.0
+  },
+  "full": {
+    "extra_tokens": 20739.5,
+    "lines_saved": 3.0,
+    "tokens_per_line": 6913.1667
+  }
+}

@@ -1,0 +1,15 @@
+# scratch: workspaces, episodes, Jupyter and matplotlib state, dev scripts
+.runtime/
+_build/out/
+__pycache__/
+*.pyc
+.venv/
+.uv-cache/
+
+# the unpacked ledger (run.py rebuilds it from llm.sqlite.gz)
+artifacts/cache/llm.sqlite
+
+# never commit a key
+modelscope.txt
+*.key
+.env

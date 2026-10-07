@@ -1,0 +1,21 @@
+{
+  "off": {
+    "episodes": 34,
+    "with_check": 0,
+    "broken": 0,
+    "mutants": 0,
+    "caught": 0,
+    "score": null
+  },
+  "full": {
+    "episodes": 34,
+    "with_check": 32,
+    "broken": 0,
+    "mutants": 246,
+    "caught": 221,
+    "score": 0.8984
+  },
+  "vs_hidden": "SIMILAR",
+  "hidden_pct": 0.9507,
+  "coverage": "MORE"
+}

@@ -1,0 +1,12 @@
+flowchart TB
+    %%STYLES%%
+    P["📝 <b>S61 pre-register</b><br/>hypotheses · rules · fingerprints"]:::gold --> R["🏃 <b>S62 runner</b><br/>arms · contamination guard"]:::host
+    R --> PI["🧪 <b>S63 pilot</b><br/>error rate · detectable effect"]:::lab
+    PI --> M["⚖️ <b>S64 main comparison</b><br/>off · terse · slogan · rules · full"]:::lab
+    M --> C["🎛️ <b>S65 controls</b>"]:::lab
+    M --> A["🧾 <b>S66 ablation ledger</b><br/>keep or remove each piece"]:::lab
+    M --> D["🎚️ <b>S67 levels</b>"]:::lab
+    M --> T["🌍 <b>S68 six models</b>"]:::lab
+    M --> G["⛳ <b>S69 Goodhart</b>"]:::warn
+    A --> GATE["🚪 <b>S70 rule-change gate</b>"]:::gold
+    GATE --> SHIP["📦 <b>S71 the shipped system</b>"]:::plugin

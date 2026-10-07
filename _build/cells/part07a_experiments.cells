@@ -1,0 +1,1191 @@
+#%% md
+# Part VII - Experiments: does any of it work?
+
+Everything so far was built to be measured; this Part measures it.
+
+**Where this sits.** Parts IV to VI built a system out of hypotheses: that a procedure with a stopping point changes what models write, that guards survive when they are named as non-negotiable, that hooks beat pasted text, that gates beat rules, that a critic finds what the first pass missed. This Part tests them against the 34 tasks, with the rule this notebook applies to everything it builds: a piece of the system that does not earn its place is removed. The hypotheses and their decision rules are written down and fingerprinted *before* the main run, the arms are run on the same tasks with the same budget, every comparison is paired by task, and every interval comes from resampling tasks, the unit that actually varies.
+
+**By the end of this Part you can** pre-register an experiment on an agent, run arms against each other without letting one contaminate another, estimate before spending how large an effect your design can detect, read a paired bootstrap interval and a Holm-corrected decision, run an ablation ledger that can remove features, and put a proposed rule change through a gate that refuses ties.
+
+{{diagram:part7_map}}
+
+#%% md
+## S61 - Pre-registration: the rules of the game, before the game
+
+**Theory.** An experiment designed after its results are known can find almost anything. The cure is to write down, before the main run, what will be measured, on which tasks, how it will be summarised and what result would count as success, and then to fingerprint that record so any later change is visible. Here the record holds thirteen hypotheses with their metrics and decision rules, the arms, the replicas, the analysis split (held-out tasks for the headline claims) and the fingerprints of the suite, the ruleset and the fence. The notebook writes it once. If it runs again with a different record (a reworded hypothesis, an edited task), it does not overwrite anything: it prints what changed, so the change has to be explained rather than slipped in.
+
+**In plain terms.** We write down what would count as success before we look, and lock the note.
+
+**For teams.** Before trying a new agent setup, write down what would make you keep it and what would make you drop it, with numbers. It takes ten minutes and removes the most common failure of internal evaluations, which is deciding what the result means after seeing it.
+
+**The order that keeps a test honest.** The hypotheses and the bars they must clear are written down and fingerprinted before the main run produces a single number, so no verdict below can be bent to fit the data.
+
+{{diagram:prereg}}
+
+#%% md
+The record starts with the hypotheses as a plain table: an id, the claim in words, the metric that will decide it, and the decision rule. H1 to H5 are confirmatory and are judged together in S64; the others are decided or reported in their own sections.
+
+#%% code
+# each entry: (id, the claim, the metric that decides it, the decision rule)
+HYPOTHESES = [
+    # confirmatory: H1 to H5 are judged together in S64, under Holm's correction
+    ("H1", "the full system adds less code on held-out tasks",
+     "median over held-out tasks of (code added + 1) under full / under off, replicas averaged",
+     "the upper end of the 95% interval is below 0.85"),
+    ("H2", "the full system is not less safe",
+     "pass rate on the 10 safety tasks, full minus off", "the lower end of the 95% interval is above -5 points"),
+    ("H3", "the full system is not less complete where completeness is the point",
+     "pass rate on explicit and open tasks, full minus off", "the lower end of the 95% interval is above -10 points"),
+    ("H4", "the plugin beats the same words pasted as rules on reuse, root-cause and platform tasks",
+     "pass rate on those 7 tasks, full minus rules", "the difference is at least 15 points"),
+    ("H5", "a slogan without counterweights drops guards",
+     "safe pass rate and guard signatures on safety tasks, slogan vs off", "slogan is lower on either, interval excluding 0"),
+    # the rest are decided or reported in their own sections, outside the correction
+    ("H6", "strength follows the level: lite adds most, ultra least; ultra costs completeness",
+     "code-added ratio and pass rate by level", "the ordering holds; reported with intervals"),
+    ("H7", "the rules raise reasoning on reasoning models", "reasoning characters per call, full vs off, per model",
+     "reported as a cost bound, not a success criterion"),
+    ("H8", "a fewest-lines objective produces golfed, less safe code",
+     "golf score and safe pass rate, fewest vs full", "fewest is worse on either"),
+    ("H9", "the judges are valid", "agreement between the two judges (kappa) and bloated ranked above good",
+     "kappa at least 0.6 and bloated above good on 90% of pairs"),
+    ("H10", "without re-injection the rules decay after compaction",
+     "code-added ratio per ticket position in a long session, with and without the compaction hook", "reported"),
+    ("H11", "subagents without the rules miss more", "critic and audit findings with and without subagent rules", "reported"),
+    ("H12", "lean code is cheaper to extend", "lines changed by the extension ticket, full vs off", "reported"),
+    ("H13", "on a project with heavy conventions the full system adds fewer files and layers, tests still passing",
+     "new files and code added per house-style ticket, full vs off", "reported"),
+]
+print(f"[prereg] {len(HYPOTHESES)} hypotheses: " + ", ".join(h[0] for h in HYPOTHESES))   # the ids, in order
+
+#%% md
+Around the hypotheses goes the rest of the design: the arms, the replicas, the turn limit and the coder, the split the headline claims are made on, the correction, the ablation rule, and the fingerprints of the suite, the ruleset and the fence. If any of those changes, the experiment has changed, so all of it goes into the record.
+
+#%% code
+ARM_NAMES = ("off", "terse", "slogan", "rules", "full")     # the five arms of S64, in the order every table lists them
+PREREG = {
+    # each hypothesis as a record with named fields, in the order of the table above
+    "hypotheses": [dict(zip(("id", "claim", "metric", "decision"), h)) for h in HYPOTHESES],
+    # the design: which arms, how many runs of each task, how long an episode may go, which model writes the code
+    "arms": list(ARM_NAMES), "replicas": REPLICAS, "max_turns": MAX_TURNS, "coder": MODEL_FOR["coder"],
+    # the analysis: headline claims on held-out tasks only, five of them corrected together
+    "headline_split": "held-out", "confirmatory": ["H1", "H2", "H3", "H4", "H5"], "alpha": 0.05, "correction": "Holm",
+    # the rule S66 applies to every piece of the system, and the one piece it never removes
+    "ablation_rule": "a piece is kept only if removing it makes its target measurably worse; neutral and harmful pieces leave",
+    "exempt_from_removal": ["never cut: it protects a promise (H2), not a metric"],
+    # what happens to a model that cannot follow the action protocol
+    "not_evaluable": "a model with protocol errors on more than 30% of turns is reported, not tuned for",
+    # what the experiment runs on: an edited task, rule or fence shows up as a changed record
+    "fingerprints": {"suite": SUITE_HASH[:16],
+                     "ruleset": hashlib.sha256(RULESET_SOURCE.encode()).hexdigest()[:16],
+                     "fence": FENCE_HASH},
+}
+# the design at a glance, and the three fingerprints that pin down what it runs on
+print(f"[prereg] arms {', '.join(PREREG['arms'])}; {PREREG['replicas']} replicas per task; "
+      f"fingerprints {PREREG['fingerprints']}")
+
+#%% md
+The record is written as JSON with sorted keys, so the same content always produces the same bytes and the same fingerprint. Only the first run writes it; every later run compares itself with what was registered and names the entries that differ.
+
+#%% code
+PREREG_PATH = ART / "preregistration.json"                         # beside the experiment records it governs
+record = json.dumps(PREREG, indent=2, sort_keys=True)              # sorted keys: the same content always gives the same text
+fingerprint = hashlib.sha256(record.encode()).hexdigest()[:16]     # short, but any change to the record changes it
+if not PREREG_PATH.exists():
+    PREREG_PATH.write_text(record, encoding="utf-8")               # the first run registers; no later run writes here
+    print(f"[prereg] registered {len(HYPOTHESES)} hypotheses, fingerprint {fingerprint}")
+else:
+    old = json.loads(PREREG_PATH.read_text(encoding="utf-8"))      # what was registered before the main run
+    # entry by entry, so the message names what changed rather than only that something did
+    changed = sorted(k for k in PREREG
+                     if json.dumps(old.get(k), sort_keys=True) != json.dumps(PREREG[k], sort_keys=True))
+    # a change is reported, never written: it has to be explained, not slipped in
+    print(f"[prereg] fingerprint now {fingerprint}; " + (f"CHANGED SINCE REGISTRATION: {changed}" if changed
+                                                         else "unchanged since registration"))
+
+#%% code
+# the five confirmatory hypotheses, each with the rule that will decide it
+for h in HYPOTHESES[:5]:
+    print(f"  {h[0]:<4} {h[1]}\n       decision: {h[3]}")     # id and claim, with the decision rule under them
+print(f"  ... and {len(HYPOTHESES) - 5} more; H1 to H5 are confirmatory and Holm-corrected together")
+
+#%% md
+## S62 - The runner and the contamination guard
+
+**Theory.** An arm is a recipe for a host: no plugin, a static text, or the full system. The runner plays every combination of arm, task and replica through the same `run_episode`, in parallel, resuming from the ledger. It also checks that no arm saw another arm's instructions. That sounds paranoid until it happens: a benchmark once found its baseline quietly running with the very skill under test, because the rules were installed globally and leaked into every arm. Our guard rebuilds each arm's system message for each task and compares its fingerprint with the one the model actually saw on the episode's first turn. Any mismatch stops the analysis. A failed episode (an API error, a timeout) is recorded as failed and counted, never silently dropped, because dropping failures is how an arm that crashes on hard tasks ends up looking better on the easy ones. It gets no score, because a provider's bad minute is not the agent's failure either. And a grid in which more than one episode in twenty failed that way stops the notebook: a partial grid is resumed from the ledger later, not analysed.
+
+**In plain terms.** Every arm runs the same tasks in the same way, and we prove afterwards that none of them saw another arm's instructions.
+
+#%% md
+The arms first. Each one is a recipe, a function that builds fresh plugins for one host, so no two episodes ever share a plugin's state. The two controls are single sentences, placed in the system message exactly as written.
+
+#%% code
+# the two control texts, placed in the system message of their arms exactly as written
+TERSE_TEXT = "Keep your code and your answers short. Do not add anything the ticket does not need."
+SLOGAN_TEXT = "Write the least code that works."
+ARMS = {
+    "off": lambda: [],                                   # the unguided agent: no plugin at all
+    "terse": lambda: [StaticRules(TERSE_TEXT)],          # one sentence asking for short code
+    "slogan": lambda: [StaticRules(SLOGAN_TEXT)],        # the slogan, without any of the counterweights
+    "rules": lambda: [StaticRules(ruleset("full"))],     # the whole ruleset as static text: the words, no machinery
+    "full": lambda: full_system(),                       # plugin, gates, critic and skills
+}
+print(f"[arms] {', '.join(ARMS)}")                      # the order every table uses
+print(f"  terse : {TERSE_TEXT}")                         # what the two controls say, word for word
+print(f"  slogan: {SLOGAN_TEXT}")
+
+#%% md
+**`expected_system(arm, task, plugins_for=None)`** rebuilds, from scratch, the system message an arm should show on its first turn of a task, and returns its fingerprint. The contamination guard needs something to compare each real episode against, and the only trustworthy reference is the arm's own recipe run again. The host it builds talks to the scripted stand-in through a throwaway in-memory ledger, so making the reference can never reach a model or touch the stored answers. The ticket goes through the prompt hooks as well, so the reference has seen every hook that runs before the model's first turn.
+
+#%% code
+def expected_system(arm, task, plugins_for=None):
+    """The fingerprint of the system message an arm should show on its first turn of a task."""
+    recipe = plugins_for or ARMS[arm]                              # the arm's own recipe, unless the caller brings one
+    offline = LLM("smoke", Ledger(":memory:"), scripted=SCRIPTED)  # a door to nowhere: no model, no stored answers
+    h = Host(llm=offline, plugins=recipe(), label=arm)             # fresh plugins, exactly as an episode gets them
+    h.start_session(materialise(task, WS_DIR / "contamination" / f"{arm}-{task.id}"))   # the task's seed, untouched
+    h.handle_prompt(task.prompt)                                   # prompt hooks may change the system message too
+    return h.ctx.fingerprint()                                     # ten hex digits of the system message's hash
+
+show_def(expected_system, layer="lab")
+
+#%% code
+toy_task = SUITE["ob-postcode-cache"]               # any task will do; this one recurs through the notebook
+toy_off = expected_system("off", toy_task)          # the unguided agent's system message, fingerprinted
+toy_again = expected_system("off", toy_task)        # built again from nothing: must come out the same
+toy_terse = expected_system("terse", toy_task)      # one control sentence more in the system message
+print(f"[expected_system] off on {toy_task.id}: {toy_off}; rebuilt: {toy_again}; identical: {toy_off == toy_again}")
+print(f"  terse on the same task: {toy_terse}; different from off: {toy_terse != toy_off}")
+
+#%% md
+**`Run`** is the record of one cell of the grid: which arm, which task, which replica, the episode if there was one, its score, and an error if something outside the agent stopped it. Keeping a failure as a `Run` with an error, rather than dropping it, is what lets every table count failures. A run with an error has no score, so every analysis that filters on `r.score` leaves it out of the comparisons, while the failure count still sees it.
+
+#%% code
+@dataclass
+class Run:
+    arm: str                     # the arm's name, which is also the key of its recipe
+    task: str                    # the task id
+    replica: int                 # which repeat of the (arm, task) pair; part of the key of every stored answer
+    episode: Episode = None      # what happened, turn by turn; None if the episode never got going
+    score: Score = None          # the hidden test's verdicts; None for a run the API cut short
+    error: str = ""              # why the run failed outside the agent's control, if it did
+
+show_def(Run, layer="lab")
+
+#%% code
+toy_failed = Run("full", "ob-postcode-cache", 0, error="HTTP 503: the provider was busy")   # what an API failure leaves
+# no score, so no comparison sees it; a non-empty error, so every failure count does
+print(f"[run] {toy_failed.arm}/{toy_failed.task} replica {toy_failed.replica}: score {toy_failed.score}, "
+      f"counted as failed: {bool(toy_failed.error)}")
+
+#%% md
+**`GridIncomplete`** is the exception that stops the notebook when too many episodes in a grid failed for reasons outside the agent, such as timeouts and provider errors. A partial grid analysed as if it were whole would compare arms on different sets of tasks, the very mistake the paired design is there to prevent. It is a class of its own so the traceback names the problem precisely and its message says what to do: resume the run from the ledger later.
+
+#%% code
+class GridIncomplete(RuntimeError):
+    """Too many episodes failed for reasons outside the agent for the grid to be worth analysing."""
+
+show_def(GridIncomplete, layer="lab")
+
+#%% md
+**`run_grid(arms, tasks, replicas, recipes, label, model, max_failed)`** plays every combination of arm, task and replica through the same `run_episode`, ten at a time, and returns one `Run` per combination. Each episode gets a fresh host built from its arm's recipe, with the same turn limit and the same model, so the recipe is the only thing that differs between arms. An error inside an episode is caught and recorded on its `Run`, apart from two that must stop everything: a reply missing from the ledger in a replay, and a refusal to spend. Once every episode is back, more failures than one in twenty (three are always tolerated) raise `GridIncomplete` instead of returning a partial grid.
+
+#%% code
+def run_grid(arms, tasks, replicas=range(REPLICAS), recipes=None, label="", model=None, max_failed=0.05):
+    """Every (arm, task, replica), in parallel, resumable from the ledger. Returns [Run]. An
+    episode the API cut short is a failed run, not a failed agent: it gets no score. More
+    than `max_failed` of them stops the notebook: a partial grid is resumed, not analysed."""
+    recipes = recipes or ARMS                                  # the five arms of S64, unless a section brings its own
+    jobs = []
+    for r in replicas:                                         # replica 0 of every arm and task is queued before replica 1
+        for a in arms:
+            for t in tasks:
+                jobs.append((a, t, r))                         # one episode to play
+
+    def one(job):
+        arm, task, replica = job                               # one queued episode
+        try:
+            # a fresh host per episode, from the arm's recipe, so nothing carries over between runs
+            ep = run_episode(task, Host(model=model, plugins=recipes[arm](), label=arm), replica=replica)
+            if ep.stop.startswith("error"):                    # the API gave up mid-episode: a failed run, not a failed agent
+                return Run(arm, task.id, replica, ep, error=scrub(ep.stop)[:200])
+            return Run(arm, task.id, replica, ep, score(task, ep.ws, visible=False))   # judged by the hidden test alone
+        except (CacheMiss, SpendRefused):
+            raise                                              # a missing answer or a refusal to spend stops everything
+        except Exception as e:                    # recorded and counted, never dropped
+            return Run(arm, task.id, replica, error=f"{type(e).__name__}: {scrub(e)}"[:200])
+
+    start = time.perf_counter()                                # for the elapsed time in the progress lines
+    out = []                                                   # results in job order, which pool.map keeps
+    every = max(1, len(jobs) // 6)                             # report progress about six times per grid
+    pool = ThreadPoolExecutor(WORKERS)                         # not a with-block: an interrupt must not wait for it
+    try:
+        for i, run in enumerate(pool.map(one, jobs), 1):
+            out.append(run)
+            if i % every == 0 or i == len(jobs):               # and always once at the end
+                print(f"  [{label or 'grid'}] {i}/{len(jobs)} episodes, {time.perf_counter() - start:.0f}s, "
+                      f"{sum(bool(r.error) for r in out)} failed")
+    except KeyboardInterrupt:
+        if FRONT_DOOR.client:
+            FRONT_DOOR.client.stop.set()                       # the client stops retrying, so the threads end quickly
+        pool.shutdown(wait=False, cancel_futures=True)         # queued episodes are dropped; finished ones are in the ledger
+        raise
+    pool.shutdown()                                            # every episode is back
+    failed = sum(bool(r.error) for r in out)                   # runs that ended outside the agent's control
+    # three failures always pass, so one bad minute cannot stop a small grid
+    if failed > max(3, max_failed * len(out)):
+        raise GridIncomplete(f"{failed} of {len(out)} episodes in '{label}' failed outside the agent's control; "
+                             "resume the run later instead of analysing a partial grid")
+    return out
+
+show_def(run_grid, layer="lab")
+
+#%% md
+**`contamination(runs, recipes=None)`** is the guard itself. For every run it rebuilds the system message the run's arm should have shown, with `expected_system`, and compares that fingerprint with the one recorded on the episode's first turn; it returns the runs that do not match. It checks what the model actually saw, not what the configuration says it should have seen, because the leak it exists to catch (rules installed globally and picked up by every arm) leaves the configuration looking clean. A run without an episode has nothing to check and is already counted as a failure.
+
+#%% code
+def contamination(runs, recipes=None):
+    """Runs whose first-turn system message differs from what their arm should show."""
+    bad = []                                                   # (arm, task, replica) of every run that saw the wrong rules
+    for r in runs:
+        if r.episode and r.episode.turns:                      # a run that never reached the model has nothing to check
+            # the reference, rebuilt from the arm's own recipe on the same task
+            want = expected_system(r.arm, SUITE[r.task], (recipes or ARMS)[r.arm])
+            if r.episode.turns[0].system != want:              # the fingerprint the model saw on turn one
+                bad.append((r.arm, r.task, r.replica))
+    return bad
+
+show_def(contamination, layer="lab")
+
+#%% md
+Two hand-built runs show the guard at work: both claim to be the terse arm on the same task, but only the first carries the fingerprint the terse arm really produces.
+
+#%% code
+toy_runs = []
+for toy_system in (expected_system("terse", toy_task), "0123456789"):    # the arm's real fingerprint, then a stranger's
+    # a first turn with nothing in it but the fingerprint the guard reads
+    toy_turn = Turn(1, "read", toy_task.entry, True, "", 0, 0, 0, 0, 0.0, False, system=toy_system)
+    toy_episode = Episode(toy_task.id, "terse", "toy", len(toy_runs), [toy_turn], "done", "", 0, 0.0, "")
+    toy_runs.append(Run("terse", toy_task.id, len(toy_runs), toy_episode))   # replicas 0 and 1
+# only the second run should come back: it saw a system message the terse arm never produces
+print(f"[contamination] runs whose first turn does not match their arm: {contamination(toy_runs)}")
+
+#%% code
+# every arm on one task: the fingerprints must all differ, or the guard could not tell the arms apart
+fps = {arm: expected_system(arm, SUITE["ob-postcode-cache"]) for arm in ARMS}   # one fingerprint per arm
+# as many distinct fingerprints as arms means no two arms share a system message
+print(f"[arms] {len(ARMS)} arms, all with distinct system messages: {len(set(fps.values())) == len(ARMS)}")
+for arm, fp in fps.items():
+    print(f"  {arm:<7} system fingerprint {fp}")
+
+#%% md
+## S63 - The pilot, and the smallest effect worth looking for
+
+**Theory.** Before the main run, a pilot answers two questions cheaply. First, does the full system work at all with this model: is the protocol error rate under 10%, the limit the plan set for the pilot, and do episodes finish? (The registered record itself holds only the 30% rule for calling a model not evaluable.) Second, how noisy is the thing we will measure? The headline metric is a per-task ratio of code added, and the spread of its logarithm across tasks decides the **minimum detectable effect**: the smallest true reduction that a design with this many tasks and replicas would detect most of the time. If that effect is larger than anything we could hope for, the main run would be a waste of money, and it is better to know that now. The pilot uses the nine dev tasks, which are allowed to inform choices; the held-out tasks are not touched until the main run.
+
+**In plain terms.** A small dress rehearsal on the practice tasks: does the system run cleanly, and is the experiment big enough to see what we are looking for?
+
+#%% code
+DEV = [t for t in SUITE.values() if t.split == "dev"]               # the practice tasks: allowed to inform choices
+HELD = [t for t in SUITE.values() if t.split == "held-out"]         # the tasks every headline claim is made on
+print(f"[pilot] {len(DEV)} dev tasks for the pilot; {len(HELD)} held-out tasks wait for the main run")
+PILOT = run_grid(["off", "full"], DEV, replicas=[0], label="pilot")   # one run each, unguided and full
+
+#%% md
+The first question is whether the full system can follow the action protocol with this model. A turn whose action is `none` is a turn where the model's reply held no usable action.
+
+#%% code
+full_turns = []                                                      # every turn the full system took in the pilot
+for r in PILOT:
+    if r.arm == "full" and r.episode:                                # failed runs have no turns to count
+        full_turns.extend(r.episode.turns)
+proto_rate = sum(x.action == "none" for x in full_turns) / max(1, len(full_turns))   # max(1, ...) guards an empty pilot
+# the counts behind the rate; the verdict against the 10% limit comes after the table
+print(f"[pilot] the full system took {len(full_turns)} turns on the dev tasks; "
+      f"{sum(x.action == 'none' for x in full_turns)} of them held no usable action")
+
+#%% md
+The second question is how noisy the headline metric is. The spread of the log code ratio across dev tasks, together with the number of held-out tasks, gives the smallest ratio the main run can be expected to detect.
+
+#%% code
+by = {(r.arm, r.task): r for r in PILOT}                            # one run per (arm, task) in the pilot
+logs = []                                                            # the paired code ratio per dev task, as a log
+for t in DEV:
+    full_score, off_score = by[("full", t.id)].score, by[("off", t.id)].score   # either is None for a failed run
+    if full_score and off_score:                                     # a task with a failed run has no pair
+        logs.append(math.log((full_score.added_code + 1) / (off_score.added_code + 1)))   # log of the paired ratio
+sd = float(np.std(logs, ddof=1)) if len(logs) > 1 else float("nan")   # one task alone has no spread
+n_main = len(HELD)                                                   # the main run's sample, in tasks
+# 2.8 is 1.96 + 0.84: a two-sided 5% test with 80% power, on the log scale, turned back into a ratio
+mde = math.exp(-2.8 * sd / math.sqrt(n_main))
+# below zero, the full system wrote less than the unguided agent on that task
+print("[pilot] log of (full + 1) / (off + 1) per dev task: " + ", ".join(f"{v:+.2f}" for v in logs))
+
+#%% code
+pilot_rows = []                                                      # one row per dev task, both arms side by side
+for t in DEV:
+    off_run, full_run = by[("off", t.id)], by[("full", t.id)]        # the pair the pilot compares
+    pilot_rows.append({
+        "task": t.id,
+        "off": off_run.score.short() if off_run.score else "error",          # every verdict, or 'error' for a failed run
+        "full": full_run.score.short() if full_run.score else "error",
+        "off code": off_run.score.added_code if off_run.score else None,     # lines of code added
+        "full code": full_run.score.added_code if full_run.score else None,
+        "full turns": len(full_run.episode.turns) if full_run.episode else None,      # did episodes finish in time?
+    })
+# column key, header, number format
+table(pilot_rows, [("task", "dev task", ""), ("off", "off", ""), ("full", "full", ""), ("off code", "off code", "d"),
+                   ("full code", "full code", "d"), ("full turns", "full turns", "d")])
+
+#%% code
+# the pilot's two answers: does the protocol hold, and how small an effect can the main run see?
+print(f"\n  protocol errors under the full system: {proto_rate:.1%} of turns (the plan's limit, 10%): "
+      f"{'PASSED' if proto_rate < 0.10 else 'FAILED'}")
+print(f"  spread of log(code ratio) across dev tasks: sd {sd:.2f}; with {n_main} held-out tasks the main run can detect")
+print(f"  a true ratio of about {mde:.2f} (a {1 - mde:.0%} reduction) with 80% power at the 5% level")
+save_exp("pilot", {"protocol_rate": proto_rate, "sd_log_ratio": sd, "mde_ratio": mde, "tasks": len(DEV)})   # S66 quotes mde_ratio
+
+#%% md
+## S64 - The main comparison
+
+**Theory.** Five arms run on all 34 tasks, twice each: no plugin, the two controls (a terse instruction and a slogan), the ruleset pasted as static text, and the full system. Every comparison is **paired by task**: an arm's result on a task is compared with the baseline's result on the same task, and the tasks are what get resampled when the intervals are built (a cluster bootstrap), because tasks differ far more from each other than replicas of one task do. The headline metric for size is the median, over held-out tasks, of the per-task ratio of code added (one is added to both sides, so a task where either arm added nothing does not divide by zero). The pass rate is reported beside it everywhere, because a system that shrinks code by breaking it has achieved nothing.
+
+**In plain terms.** Five versions of the agent do the same 34 tickets twice. We compare each one with the unguided agent, ticket by ticket.
+
+**Five arms, from nothing to everything.** Two cheap controls (a short-prose instruction and a one-line slogan), the full ruleset pasted in as plain text, and the full system, which delivers the same ruleset through hooks and adds the gates and the critic. The gap between the last two is what the machinery is worth (H4).
+
+{{diagram:arms}}
+
+#%% md
+**`bootstrap(values_by_task, stat, n=4000, seed=SEED)`** is the cluster bootstrap behind every interval in this Part. It takes one value per task, draws 4,000 new samples of tasks with replacement, and applies the statistic to each, so the spread of the results shows how far the answer would move with a different sample of tasks. Tasks are what gets resampled because they differ from each other far more than two replicas of one task do; resampling episodes would pretend there were more independent observations than there are. Its own seeded generator makes every interval identical from run to run.
+
+#%% code
+def bootstrap(values_by_task, stat, n=4000, seed=SEED):
+    """Resample tasks with replacement; return the statistic's samples."""
+    rng = np.random.default_rng(seed)                       # its own generator: the same seed gives the same interval
+    keys = list(values_by_task)                             # one entry per task, in the caller's order
+    if not keys:
+        return np.array([np.nan])                           # nothing paired: an interval of nothing, not an error
+    idx = rng.integers(0, len(keys), size=(n, len(keys)))   # n resamples, each len(keys) task positions drawn with replacement
+    vals = [values_by_task[k] for k in keys]                # the per-task values, by position
+    samples = []
+    for row in idx:
+        resample = [vals[i] for i in row]                   # one resampled set of tasks; a task can appear twice
+        samples.append(stat(resample))                      # the statistic on that set
+    return np.array(samples)
+
+show_def(bootstrap, layer="lab")
+
+#%% code
+toy_ratios = {"task a": 0.5, "task b": 0.8, "task c": 1.0, "task d": 1.6}   # four invented per-task ratios
+toy_samples = bootstrap(toy_ratios, np.median, n=1000)                       # a thousand resampled medians
+toy_lo, toy_hi = np.percentile(toy_samples, [2.5, 97.5])                     # the middle 95% of them
+print(f"[bootstrap] median of the four tasks: {np.median(list(toy_ratios.values())):.2f}; "
+      f"95% interval over resampled tasks: {toy_lo:.2f} to {toy_hi:.2f}")
+
+#%% md
+**`per_task(runs, arm, metric, tasks)`** collapses an arm's runs into one number per task: the metric averaged over that task's replicas. Every comparison in this Part is paired by task, and pairing needs exactly one value per task on each side. Runs without a score, the ones the API cut short, are skipped, and a task with no scored run gets no entry at all, so it drops out of the pairing instead of counting as a zero.
+
+#%% code
+def per_task(runs, arm, metric, tasks):
+    """{task: mean of metric over the arm's replicas}, skipping failed runs."""
+    out = {}
+    for t in tasks:
+        # this arm's scored replicas of the task, each turned into a number by the metric
+        vals = [metric(r) for r in runs if r.arm == arm and r.task == t.id and r.score]
+        if vals:                                            # no scored replica: the task stays out of the pairing
+            out[t.id] = float(np.mean(vals))                # replicas averaged, so each task counts once
+    return out
+
+show_def(per_task, layer="lab")
+
+#%% md
+A few invented runs on three real task ids make the next three functions concrete: two replicas per arm and task, and one extra replica the API cut short.
+
+#%% code
+toy_tasks = [SUITE["ob-postcode-cache"], SUITE["ob-report-flags"], SUITE["ru-badge-name"]]
+# (arm, task, replica, code added, correct), all invented
+toy_plan = [("off", 0, 0, 30, 1), ("off", 0, 1, 26, 1), ("full", 0, 0, 9, 1), ("full", 0, 1, 11, 1),
+            ("off", 1, 0, 12, 1), ("off", 1, 1, 14, 0), ("full", 1, 0, 7, 1), ("full", 1, 1, 5, 1),
+            ("off", 2, 0, 8, 1), ("off", 2, 1, 8, 1), ("full", 2, 0, 8, 0), ("full", 2, 1, 6, 1)]
+toy_runs = []
+for toy_arm, toy_i, toy_rep, toy_added, toy_correct in toy_plan:
+    toy_id = toy_tasks[toy_i].id
+    # a run with a score but no episode: all these functions read is the score
+    toy_runs.append(Run(toy_arm, toy_id, toy_rep, None, Score(toy_id, toy_correct, added_code=toy_added)))
+toy_runs.append(Run("full", toy_tasks[2].id, 2, error="timeout"))    # a third replica with no score
+toy_code = per_task(toy_runs, "full", lambda r: r.score.added_code, toy_tasks)   # the timeout is skipped, not a zero
+print("[per_task] full, code added, replicas averaged: " + ", ".join(f"{k} {v:.1f}" for k, v in toy_code.items()))
+
+#%% md
+**`ratio_summary(runs, arm, tasks, base="off")`** is the headline statistic: for each task, the arm's average code added plus one, divided by the baseline's, then the median of those ratios with its bootstrap interval. The plus one keeps a task where either side added nothing from dividing by zero. A ratio per task, rather than a ratio of totals, stops one large task from deciding the result, and the median stops one wild task from dragging it. It returns the median, the interval, the bootstrap samples and the per-task ratios, because the figures need all four.
+
+#%% code
+def ratio_summary(runs, arm, tasks, base="off"):
+    """Median paired ratio of (code added + 1), with a 95% interval over tasks."""
+    a = per_task(runs, arm, lambda r: r.score.added_code + 1, tasks)     # the arm, one value per task
+    b = per_task(runs, base, lambda r: r.score.added_code + 1, tasks)    # the baseline, the same way
+    ratios = {}
+    for t in a:
+        if t in b:                                          # only tasks both sides have: the comparison is paired
+            ratios[t] = a[t] / b[t]
+    samples = bootstrap(ratios, np.median)                  # the median over 4,000 resampled sets of tasks
+    median = float(np.median(list(ratios.values())))        # the estimate on the tasks actually run
+    interval = np.percentile(samples, [2.5, 97.5])          # the middle 95% of the resampled medians
+    return median, interval, samples, ratios
+
+show_def(ratio_summary, layer="lab")
+
+#%% code
+toy_med, toy_ci, toy_samples, toy_ratios = ratio_summary(toy_runs, "full", toy_tasks)   # full against off
+print("[ratio_summary] (full + 1) / (off + 1) per task: " + ", ".join(f"{k} {v:.2f}" for k, v in toy_ratios.items()))
+# three tasks make a wide interval: the bootstrap is honest about how little three tasks say
+print(f"  median {toy_med:.2f}, 95% interval {toy_ci[0]:.2f} to {toy_ci[1]:.2f}, from {len(toy_samples)} resamples")
+
+#%% md
+**`rate_summary(runs, arm, tasks, metric, base="off")`** does the same for anything measured as a rate or a per-run number: the paired difference, arm minus baseline, averaged over tasks, with its bootstrap interval. It serves the pass rate, the safe rate, the ablation targets and the rule-change gate alike, because in each case the mean over tasks is what matters. When no task has both sides, the estimate is `nan` rather than zero, so an empty comparison cannot pass for no effect.
+
+#%% code
+def rate_summary(runs, arm, tasks, metric, base="off"):
+    """Paired difference in a rate (0 to 1), arm minus base, with a 95% interval."""
+    a = per_task(runs, arm, metric, tasks)                  # the arm, one value per task
+    b = per_task(runs, base, metric, tasks)                 # the baseline, the same way
+    diffs = {}
+    for t in a:
+        if t in b:                                          # paired: only tasks both sides have
+            diffs[t] = a[t] - b[t]
+    samples = bootstrap(diffs, np.mean)                     # the mean difference over resampled sets of tasks
+    if diffs:
+        estimate = float(np.mean(list(diffs.values())))     # the mean difference on the tasks actually run
+    else:
+        estimate = float("nan")                             # nothing to compare is not the same as no difference
+    return estimate, np.percentile(samples, [2.5, 97.5]), samples
+
+show_def(rate_summary, layer="lab")
+
+#%% code
+# the pass verdict as a number per run; per task, full minus off, then the mean over tasks
+toy_diff, toy_ci, toy_samples = rate_summary(toy_runs, "full", toy_tasks, lambda r: float(r.score.passed))
+print(f"[rate_summary] pass rate, full minus off: {toy_diff:+.0%} (95% interval {toy_ci[0]:+.0%} to {toy_ci[1]:+.0%})")
+
+#%% md
+**`holm(pvalues, alpha=0.05)`** decides which of several hypotheses survive being tested together. Testing five claims at 5% each gives a much higher chance than 5% that at least one passes by luck; Holm's step-down procedure fixes that by sorting the p-values and holding the smallest to alpha divided by five, the next to alpha divided by four, and so on. The first one that misses its threshold stops the walk: it and every hypothesis after it count as not supported, whatever their own p-values.
+
+#%% code
+def holm(pvalues, alpha=0.05):
+    """{name: rejected?} under Holm's step-down procedure."""
+    order = sorted(pvalues, key=pvalues.get)                # smallest p-value first
+    out = {}
+    still = True                                            # True until one hypothesis misses its threshold
+    for i, name in enumerate(order):
+        # the i-th smallest must clear alpha / (hypotheses left); after one failure, every later one fails too
+        still = still and pvalues[name] <= alpha / (len(order) - i)
+        out[name] = still
+    return out
+
+show_def(holm, layer="lab")
+
+#%% code
+toy_p = {"A": 0.004, "B": 0.030, "C": 0.011, "D": 0.040, "E": 0.012}   # five invented p-values
+print("[holm] each p-value against its threshold, smallest first:")
+for toy_i, toy_name in enumerate(sorted(toy_p, key=toy_p.get)):
+    print(f"  {toy_name}: p {toy_p[toy_name]:.3f} against {0.05 / (5 - toy_i):.4f}")   # the bar loosens as the walk goes on
+print(f"  supported after the correction: {holm(toy_p)} (D clears 0.05 on its own, but B stopped the walk)")
+
+#%% md
+With the statistics in place, the main grid runs: five arms, every task, two replicas each.
+
+#%% code
+MAIN = run_grid(list(ARM_NAMES), list(SUITE.values()), label="main")      # every later section draws on these runs
+
+#%% code
+bad = contamination([r for r in MAIN if r.replica == 0])     # the guard, on the first replica of every arm and task
+print(f"\n[contamination] first-turn system messages that do not match their arm: {bad or 'none'}")
+assert not bad, "an arm saw another arm's instructions; the analysis stops here"    # one leak voids every comparison
+failed = [(r.arm, r.task, r.replica, r.error) for r in MAIN if r.error]     # runs the API cut short: kept and counted
+print(f"[main] {len(MAIN)} runs, {len(failed)} failed{': ' + str(failed[:3]) if failed else ''}")
+
+#%% md
+The main table: for each arm, the headline ratio against the unguided agent with its interval, the pass rate on held-out tasks, the safe rate on the safety tasks, and what the arm cost in turns, tokens and words.
+
+#%% code
+passed = lambda r: float(r.score.passed)                   # the pass verdict as a number, for rate_summary
+rows = []
+for arm in ARM_NAMES:
+    if arm != "off":
+        med, ci, _, _ = ratio_summary(MAIN, arm, HELD)       # the arm against the unguided agent, held-out tasks only
+    else:
+        med, ci, _, _ = (1.0, (1.0, 1.0), None, None)        # the baseline against itself is 1 by definition
+    arm_runs = [r for r in MAIN if r.arm == arm and r.score]                                   # this arm's scored runs
+    pr = np.mean([r.score.passed for r in arm_runs if r.task in {t.id for t in HELD}])         # pass rate, held-out
+    sr = np.mean([r.score.safe == 1 for r in arm_runs if SUITE[r.task].category == "safety"])  # safe rate, safety tasks
+    eps_ = [r.episode for r in MAIN if r.arm == arm and r.episode]     # every episode, scored or not, for the costs
+    episode_tokens = []
+    for e in eps_:
+        episode_tokens.append(sum(t.prompt_tokens + t.completion_tokens for t in e.turns))   # tokens in and out
+    # medians for the costs: one runaway episode should not set an arm's typical price
+    rows.append({"arm": arm, "ratio": med, "ci": f"{ci[0]:.2f} to {ci[1]:.2f}", "pass": pr, "safe": sr,
+                 "added": np.median([r.score.added_code for r in arm_runs]),            # median lines of code added
+                 "turns": np.median([len(e.turns) for e in eps_]),                       # median turns per episode
+                 "tokens": np.median(episode_tokens),                                     # median tokens per episode
+                 "words": np.median([check_contract(e.done_text)["words"] for e in eps_])})   # words in the final answer
+table(rows, [("arm", "arm", ""), ("ratio", "code vs off", ".2f"), ("ci", "95% interval", ""), ("pass", "pass, held-out", ".0%"),
+             ("safe", "safe", ".0%"), ("added", "median added", ".0f"), ("turns", "turns", ".0f"), ("tokens", "tokens", ".0f"),
+             ("words", "answer words", ".0f")])
+MAIN_ROWS = rows                                         # kept under its own name: the record and Part X read it
+
+#%% md
+Now the five confirmatory hypotheses, each estimated on its own tasks. H4 is the only one whose baseline is the rules arm rather than the unguided agent, and H5 is the only one about the slogan.
+
+#%% code
+# ---- the confirmatory hypotheses, Holm-corrected together ---------------------------
+held_ids = {t.id for t in HELD}                                                     # the held-out task ids
+med1, ci1, s1, ratios1 = ratio_summary(MAIN, "full", HELD)                         # H1: code, held-out tasks
+safety = [t for t in SUITE.values() if t.category == "safety"]
+d2, ci2, s2 = rate_summary(MAIN, "full", safety, lambda r: float(r.score.safe == 1))   # H2: safe rate, full minus off
+compl = [t for t in SUITE.values() if t.category in ("explicit", "open")]
+d3, ci3, s3 = rate_summary(MAIN, "full", compl, passed)                            # H3: where completeness is the point
+# H4's tasks: reuse, root cause, and the one platform task
+h4_tasks = [t for t in SUITE.values() if t.category in ("reuse", "root-cause") or t.id == "ob-member-unique"]
+d4, ci4, s4 = rate_summary(MAIN, "full", h4_tasks, passed, base="rules")           # H4: against the pasted rules
+d5, ci5, s5 = rate_summary(MAIN, "slogan", safety, lambda r: float(r.score.safe == 1))   # H5: the slogan's safe rate
+# how many tasks each estimate rests on: the fewer, the wider its interval
+print(f"[holm] tasks behind each estimate: H1 {len(ratios1)}, H2 {len(safety)}, H3 {len(compl)}, "
+      f"H4 {len(h4_tasks)}, H5 {len(safety)}")
+
+#%% md
+Each p-value is one-sided and comes straight from the bootstrap: the share of resampled estimates that land on the wrong side of the hypothesis's own decision rule.
+
+#%% code
+P = {"H1": float(np.mean(s1 >= 0.85)),       # resamples where the ratio is not below the bar
+     "H2": float(np.mean(s2 <= -0.05)),      # resamples where safety fell by five points or more
+     "H3": float(np.mean(s3 <= -0.10)),      # resamples where completeness fell by ten points or more
+     "H4": float(np.mean(s4 < 0.15)),        # resamples where the lead over the pasted rules is under fifteen points
+     "H5": float(np.mean(s5 >= 0.0))}        # resamples where the slogan was not less safe
+HOLM = holm(P)                               # the five decided together
+print("[holm] " + ", ".join(f"{h} p={p:.3f}" for h, p in P.items()))     # before the correction
+
+#%% code
+# one row per hypothesis: what was estimated, its interval, and the bootstrap p-value
+rows = [{"h": "H1", "estimate": f"ratio {med1:.2f}", "interval": f"{ci1[0]:.2f} to {ci1[1]:.2f}", "p": P["H1"]},
+        {"h": "H2", "estimate": f"safe {d2:+.0%}", "interval": f"{ci2[0]:+.0%} to {ci2[1]:+.0%}", "p": P["H2"]},
+        {"h": "H3", "estimate": f"pass {d3:+.0%}", "interval": f"{ci3[0]:+.0%} to {ci3[1]:+.0%}", "p": P["H3"]},
+        {"h": "H4", "estimate": f"pass {d4:+.0%} vs rules", "interval": f"{ci4[0]:+.0%} to {ci4[1]:+.0%}", "p": P["H4"]},
+        {"h": "H5", "estimate": f"safe {d5:+.0%} (slogan)", "interval": f"{ci5[0]:+.0%} to {ci5[1]:+.0%}", "p": P["H5"]}]
+for r in rows:
+    r["verdict"] = "SUPPORTED" if HOLM[r["h"]] else "NOT SUPPORTED"      # the verdict after the correction, not before
+table(rows, [("h", "hypothesis", ""), ("estimate", "estimate", ""), ("interval", "95% interval", ""), ("p", "p (bootstrap)", ".3f"),
+             ("verdict", "after Holm", "")])
+
+#%% code
+# the headline in one sentence, kept with the record
+summary = (f"code ratio {med1:.2f} ({ci1[0]:.2f} to {ci1[1]:.2f}) on held-out tasks; safety {d2:+.0%}; "
+           f"completeness {d3:+.0%}")
+# per hypothesis: the estimate, its interval and the verdict after Holm; FIG 14's reading quotes these
+save_exp("main", {"h1": {"ratio": med1, "lo": ci1[0], "hi": ci1[1], "supported": HOLM["H1"]},
+                  "h2": {"diff": d2, "lo": ci2[0], "hi": ci2[1], "supported": HOLM["H2"]},
+                  "h3": {"diff": d3, "lo": ci3[0], "hi": ci3[1], "supported": HOLM["H3"]},
+                  "h4": {"diff": d4, "lo": ci4[0], "hi": ci4[1], "supported": HOLM["H4"]},
+                  "h5": {"diff": d5, "lo": ci5[0], "hi": ci5[1], "supported": HOLM["H5"]},
+                  # each arm's headline numbers, from the main table above
+                  "arms": {r["arm"]: {"ratio": r["ratio"], "pass": r["pass"], "safe": r["safe"]} for r in MAIN_ROWS},
+                  "runs": len(MAIN), "failed": len(failed), "summary": summary})     # failures are part of the record
+
+#%% code
+# FIG  the main comparison
+fig, axes = plt.subplots(1, 2, figsize=(11, 3.8))
+ax = axes[0]                                             # left: the headline, code against the unguided agent
+arms_ = [a for a in ARM_NAMES if a != "off"]             # off is the baseline, so it has no ratio of its own
+for i, arm in enumerate(arms_):
+    med, ci, _, ratios = ratio_summary(MAIN, arm, HELD)
+    jitter = np.random.default_rng(i).uniform(-0.15, 0.15, len(ratios))     # a fixed vertical spread, so dots do not overlap
+    ax.scatter(list(ratios.values()), np.full(len(ratios), i) + jitter, s=10, color=GRID, zorder=1)   # one dot per task
+    arm_colour = C1 if arm == "full" else INK2           # the full system in blue, the others in grey
+    ax.plot(ci, [i, i], color=arm_colour, lw=2.5, zorder=2)                  # the 95% interval
+    ax.scatter([med], [i], color=arm_colour, s=50, zorder=3)                 # the median
+ax.axvline(1, color=MUTED, lw=1, ls="--")                # no difference from the unguided agent
+ax.axvline(0.85, color=C8, lw=1, ls=":")                 # the bar H1 registered
+ax.set_xscale("log")                                     # ratios: halving and doubling sit the same distance from 1
+ax.set_yticks(range(len(arms_)), arms_)
+ax.invert_yaxis()                                        # arms read top to bottom in table order
+ax.set_xlabel("code added, ratio to the unguided agent (log scale)")
+panel(ax, "median and 95% interval over held-out tasks; dots are tasks")
+ax = axes[1]                                             # right: what the reduction must not cost
+x = np.arange(len(ARM_NAMES))                            # one pair of bars per arm, off included
+ax.bar(x - 0.2, [r["pass"] for r in MAIN_ROWS], 0.38, color=C3, label="pass, held-out")        # left bar of each pair
+ax.bar(x + 0.2, [r["safe"] for r in MAIN_ROWS], 0.38, color=C7, label="safe, safety tasks")    # right bar
+ax.set_xticks(x, ARM_NAMES)
+ax.set_ylim(0, 1.08)                                     # a little headroom above 100%
+ax.legend(loc="lower right", fontsize=7.5)
+panel(ax, "what the size must not cost")
+finish(fig, "s64_main", f"The full system writes a median {med1:.2f}x the code of the unguided agent on held-out tasks",
+       f"interval {ci1[0]:.2f} to {ci1[1]:.2f}; the red dotted line is the pre-registered bar of 0.85")
+
+#%% md
+**Reading FIG 14 (s64_main).** The left panel is the headline. Each grey dot is one held-out task's ratio of code added (the arm against the unguided agent), and the dark bar is the median with its 95% interval over tasks. The full system's median is {{exp:main.h1.ratio:.2f}} (interval {{exp:main.h1.lo:.2f}} to {{exp:main.h1.hi:.2f}}); H1 asked for the whole interval to sit below the red line at 0.85, and the verdict after Holm's correction is {{pick:main.h1.supported|True=that it did|False=that it did not}}. The right panel is the price check: the pass rate on held-out tasks and the safety rate per arm. The difference in safety, full minus off, is {{exp:main.h2.diff:+.0%}} ({{exp:main.h2.lo:+.0%}} to {{exp:main.h2.hi:+.0%}}). Read the two panels together, because either one alone could be produced by a system that is worse.
+
+#%% md
+## S65 - What the controls show
+
+**Theory.** Two control arms are there to rule out cheap explanations. If a one-sentence **terse** instruction ("keep your code short") produced the same reduction as the full system, everything in Parts IV to VI would be decoration. If the **slogan** ("write the least code that works") produced it while keeping safety, the counterweights would be decoration. And the **rules** arm, the full ruleset pasted as static text with none of the machinery, isolates what the hooks, gates and critic add on top of the words (H4). The table compares all of them on the tasks where each mechanism is supposed to matter.
+
+**In plain terms.** Could a one-liner have done the same job? This is where we find out.
+
+#%% code
+# four groups of tasks, each one where a different mechanism is supposed to matter
+groups = {"safety tasks": safety,
+          "reuse and root cause": [t for t in SUITE.values() if t.category in ("reuse", "root-cause")],
+          "over-build": [t for t in SUITE.values() if t.category == "over-build"],
+          "held-out": HELD}
+rows = []
+for name, tasks in groups.items():
+    for arm in ARM_NAMES:
+        ids = {t.id for t in tasks}                                           # the group's task ids
+        rs = [r for r in MAIN if r.arm == arm and r.task in ids and r.score]     # this arm's scored runs in the group
+        rows.append({"tasks": name, "arm": arm, "pass": np.mean([r.score.passed for r in rs]),
+                     # the safe verdict only exists on the safety tasks
+                     "safe": np.mean([r.score.safe == 1 for r in rs]) if name == "safety tasks" else None,
+                     "guards": np.mean([r.score.guards for r in rs]),           # guard signatures added per run
+                     # the unguided agent is the baseline, so its ratio is 1 by definition
+                     "ratio": ratio_summary(MAIN, arm, tasks)[0] if arm != "off" else 1.0})
+# every arm within every group: compare down a group, never across groups
+table(rows, [("tasks", "tasks", ""), ("arm", "arm", ""), ("pass", "pass", ".0%"), ("safe", "safe", ".0%"),
+             ("guards", "guards added", ".1f"), ("ratio", "code vs off", ".2f")])
+
+#%% md
+The record keys each row as `group|arm`, and adds one verdict: whether the full system showed, on the safety tasks, the asymmetry it is built on.
+
+#%% code
+CONTROLS = {}                                            # the record, keyed 'group|arm'
+for r in rows:
+    CONTROLS[f"{r['tasks']}|{r['arm']}"] = {"pass": r["pass"], "ratio": r["ratio"], "guards": r["guards"]}
+sf, so = CONTROLS["safety tasks|full"], CONTROLS["safety tasks|off"]     # full and off on the safety tasks
+# less code, at least as many guards and no lower pass rate, all in the same answers
+CONTROLS["asymmetry"] = ("BOTH" if sf["ratio"] < 1 and sf["guards"] >= so["guards"] and sf["pass"] >= so["pass"]
+                         else "NOT BOTH")
+# the three numbers behind the verdict, so the reading below can be checked against them
+print(f"[controls] safety tasks, full against off: code ratio {sf['ratio']:.2f}, guards {sf['guards']:.1f} "
+      f"against {so['guards']:.1f}, pass {sf['pass']:.0%} against {so['pass']:.0%}: {CONTROLS['asymmetry']}")
+save_exp("controls", CONTROLS)                           # the reading of the controls quotes this record
+
+#%% md
+**Reading the controls.** Read each row against the unguided agent in the same group of tasks, never across groups, because the tasks differ. On the ten safety tasks the full system wrote {{exp:controls.safety tasks|full.ratio:.2f}} times the unguided agent's code, added {{exp:controls.safety tasks|full.guards:.1f}} guards per run against {{exp:controls.safety tasks|off.guards:.1f}}, and passed {{exp:controls.safety tasks|full.pass:.0%}}; the terse instruction passed {{exp:controls.safety tasks|terse.pass:.0%}}, the slogan {{exp:controls.safety tasks|slogan.pass:.0%}} and the pasted rules {{exp:controls.safety tasks|rules.pass:.0%}}. {{pick:controls.asymmetry|BOTH=That row is the asymmetry the system is built on, visible in the numbers: less structure and more protection in the same answers.|NOT BOTH=The asymmetry the system is built on, less structure and more protection in the same answers, does not show in that row, and the never-cut list deserves the closer look that S28 and Part IX give it.}} On reuse and root-cause tasks the full system's code ratio was {{exp:controls.reuse and root cause|full.ratio:.2f}} with a pass rate of {{exp:controls.reuse and root cause|full.pass:.0%}}.
+
+#%% md
+## S66 - The ablation ledger: every piece must earn its place
+
+**Theory.** The full system is a bundle, and a bundle can hide passengers: pieces that cost tokens and turns and do nothing. The ledger removes one piece at a time and runs the result on the tasks where that piece is supposed to matter, twice each, comparing with the full system on the same tasks and replicas. Each piece has one pre-declared target metric, and the verdict follows a fixed rule. **KEPT** if removing it makes the target measurably worse (the interval excludes zero in the harmful direction); **HARMFUL** if removing it makes the target measurably better; **NEUTRAL** otherwise. Neutral and harmful pieces are removed from the shipped system in S71. That rule is strict on purpose, and it is the same rule the system applies to the code it writes: a component without a measured job is a component someone has to maintain.
+
+**In plain terms.** We take the system apart one piece at a time. A piece that makes no measurable difference gets thrown out.
+
+**How a piece earns its place.** The interval is for the full system minus the system without the piece, on that piece's own target. Only a piece whose removal measurably hurts is kept. Never cut is exempt, because it protects a promise rather than a metric.
+
+{{diagram:ablation}}
+
+#%% code
+CAT = lambda *cats: [t for t in SUITE.values() if t.category in cats]   # every task in the named categories, in suite order
+# piece: (a recipe without it, or None for a rule section; the tasks where it should matter;
+#         its target metric, higher is better; the ruleset heading it removes, or None for machinery)
+ABLATIONS = {
+    # rule sections: ablation_recipe swaps in a plugin that leaves the heading out
+    "ladder": (None, CAT("over-build", "edge", "control"), "less code", "What to build: the ladder"),
+    "read first": (None, CAT("reuse", "root-cause"), "pass", "Read first"),
+    "never cut": (None, CAT("safety"), "safe", "Never cut"),
+    "prove it": (None, CAT("over-build"), "check lines", "Prove it"),
+    "how to answer": (None, CAT("over-build", "reuse"), "fewer answer words", "How to answer"),
+    # machinery: the full system with one keyword switching that piece off
+    "project map": (lambda: full_system(map=True), CAT("reuse", "over-build"), "pass", None),
+    "read gate": (lambda: full_system(read_gate=True), CAT("reuse", "root-cause"), "pass", None),
+    "sibling scan": (lambda: full_system(siblings=True), CAT("root-cause", "reuse"), "pass", None),
+    "dependency gate": (lambda: full_system(deps=True), CAT("over-build") + [SUITE["eg-target-runtime"]], "pass", None),
+    "check nudge": (lambda: full_system(nudge=True), CAT("over-build"), "check lines", None),
+    "critic": (lambda: full_system(critic=True), CAT("over-build", "safety", "open"), "less code", None),
+}
+print(f"[ablation] {len(ABLATIONS)} pieces: " + ", ".join(ABLATIONS))
+
+#%% md
+**`_RulesWithout(section)`** is the plugin with one section of the ruleset cut out, which is how the five rule-section ablations are built. It changes nothing but the text: it lets the plugin's own hooks decide whether to inject, and swaps the `text` of what they return for `ruleset("full", drop=(section,))`. Both injecting hooks are covered, the session start and the prompt hook that puts the rules back when they go missing, so the removed section cannot slip back into the agent's context halfway through an episode.
+
+#%% code
+class _RulesWithout(LeanPlugin):
+    """The plugin with one section of the ruleset removed."""
+
+    def __init__(self, section):
+        super().__init__(level="full")                   # everything else exactly as in the full system
+        self.section = section                           # the heading of the section to leave out
+
+    def on_session_start(self, host, ctx, source, **kw):
+        out = super().on_session_start(host, ctx, source, **kw)   # the plugin decides whether to inject at all
+        if not out:
+            return out
+        return {**out, "text": ruleset("full", drop=(self.section,))}   # the same section, minus one heading
+
+    def on_user_prompt(self, host, ctx, prompt, **kw):
+        out = super().on_user_prompt(host, ctx, prompt, **kw)
+        if out and "section" in out:                     # a re-injection of the rules: drop the section here too
+            return {**out, "text": ruleset("full", drop=(self.section,))}
+        return out
+
+show_def(_RulesWithout, layer="lab")
+
+#%% code
+toy_door = LLM("smoke", Ledger(":memory:"), scripted=SCRIPTED)          # offline: nothing here reaches a model
+toy_host = Host(llm=toy_door, plugins=[_RulesWithout("Never cut")], label="toy")
+toy_host.start_session(materialise(SUITE["sf-share-link"], RUNTIME / "demo" / "rules-without"))   # a safety task's seed
+toy_rules = toy_host.ctx.sections.get("lean", (0, ""))[1]               # the rules as this host's model would read them
+# the removed heading is gone and its neighbours are still there
+print(f"[_RulesWithout] 'Never cut' heading present: {'## Never cut' in toy_rules}; "
+      f"'Prove it' heading present: {'## Prove it' in toy_rules}")
+
+#%% md
+**`ablation_recipe(name)`** turns a row of the ablation table into a recipe, a function that builds fresh plugins for one host. A machinery piece (the project map, a gate, the critic) already has its recipe in the table: `full_system` with one keyword switching that piece off. A rule section has no keyword, so its recipe is made here: the full system with `_RulesWithout` in place of the plugin, and the gates, critic and skills unchanged.
+
+#%% code
+def ablation_recipe(name):
+    recipe, _, _, section = ABLATIONS[name]              # the tasks and the metric are not needed to build plugins
+    if section:                                          # a rule section: swap the plugin, keep the rest of the system
+        return lambda: [_RulesWithout(section), LeanGates(), LeanCritic(), LeanSkills()]
+    return recipe
+
+show_def(ablation_recipe, layer="lab")
+
+#%% code
+for toy_name in ("never cut", "critic"):                 # one rule section, one piece of machinery
+    toy_plugins = ablation_recipe(toy_name)()            # a recipe is called to get fresh plugins
+    print(f"[ablation_recipe] without {toy_name}: " + ", ".join(type(p).__name__ for p in toy_plugins))
+
+#%% md
+Each piece is judged on one target, and every target is turned so that higher is better: fewer lines of code and fewer answer words count as gains, like a higher pass rate does. One rule then reads every row the same way.
+
+#%% code
+TARGET = {"less code": lambda r: -(r.score.added_code),                                   # fewer lines scores higher
+          "pass": lambda r: float(r.score.passed),                                        # 1 for a pass, 0 otherwise
+          "safe": lambda r: float(r.score.safe == 1),                                     # the safety verdict alone
+          "check lines": lambda r: float(r.score.added_check + r.score.added_test),      # a self-check or a test, either counts
+          "fewer answer words": lambda r: -float(check_contract(r.episode.done_text)["words"])}   # a shorter answer scores higher
+print(f"[ablation] targets: {', '.join(TARGET)}")
+
+#%% md
+Then each piece is removed in turn and run on its own tasks, two replicas each. The full system's runs on the same tasks come from the main grid, and the verdict follows the rule written down in S61.
+
+#%% code
+ABL_RUNS, LEDGER_ROWS = {}, []                           # the runs per piece, and one ledger row per piece
+for name, (_, tasks, metric, _) in ABLATIONS.items():
+    recipes = {f"-{name}": ablation_recipe(name), "full": ARMS["full"]}    # the arm without the piece is called '-piece'
+    runs = run_grid([f"-{name}"], tasks, recipes=recipes, label=f"without {name}")   # two replicas, the piece's own tasks
+    ABL_RUNS[name] = runs                                # kept for the task-by-task view below
+    # the full system's main-grid runs on the same tasks are the other side of each pair
+    both = runs + [r for r in MAIN if r.arm == "full" and r.task in {t.id for t in tasks}]
+    diff, ci, _ = rate_summary(both, "full", tasks, TARGET[metric], base=f"-{name}")   # full minus without
+    if ci[0] > 0:
+        verdict = "KEPT"                                 # without it, the target got measurably worse
+    elif ci[1] < 0:
+        verdict = "HARMFUL"                              # without it, the target got measurably better
+    else:
+        verdict = "NEUTRAL"                              # no difference this experiment could see
+    LEDGER_ROWS.append({"piece": name, "tasks": len(tasks), "target": metric, "effect": diff, "lo": ci[0], "hi": ci[1],
+                        "verdict": verdict})
+
+#%% code
+# one row per piece: the effect of having it, its interval, and the verdict the rule gives
+table(LEDGER_ROWS, [("piece", "piece removed", ""), ("tasks", "tasks", "d"), ("target", "target", ""), ("effect", "full minus without", ".2f"),
+                    ("lo", "low", ".2f"), ("hi", "high", ".2f"), ("verdict", "verdict", "")])
+save_exp("ablation", {r["piece"]: {k: r[k] for k in ("effect", "lo", "hi", "verdict", "target")} for r in LEDGER_ROWS})   # S71 builds on it
+
+#%% code
+# FIG  the ablation ledger
+fig, ax = plt.subplots(figsize=(9.5, 4.6))
+colour = {"KEPT": C3, "NEUTRAL": MUTED, "HARMFUL": C8}   # green kept; grey and red both leave the shipped system
+for i, r in enumerate(LEDGER_ROWS):
+    scale = max(abs(r["lo"]), abs(r["hi"]), 1e-9)         # each row on its own scale: the targets have different units
+    ax.plot([r["lo"] / scale, r["hi"] / scale], [i, i], color=colour[r["verdict"]], lw=3)     # the interval
+    ax.scatter([r["effect"] / scale], [i], color=colour[r["verdict"]], s=40, zorder=3)        # the estimate
+    ax.text(1.08, i, f"{r['verdict']}  ({r['target']})", va="center", fontsize=7.5, color=INK2)   # verdict at the right
+ax.axvline(0, color=INK2, lw=1)                           # no effect
+ax.set_yticks(range(len(LEDGER_ROWS)), [r["piece"] for r in LEDGER_ROWS])     # pieces by name
+ax.invert_yaxis()                                         # pieces read top to bottom in ledger order
+ax.set_xlim(-1.1, 1.9)                                    # room on the right for the verdict labels
+ax.set_xticks([-1, 0, 1], ["removing helps", "no effect", "removing hurts"])
+panel(ax, "each line: the effect of having the piece, scaled to its own interval")
+kept = sum(r["verdict"] == "KEPT" for r in LEDGER_ROWS)   # for the title
+finish(fig, "s66_ablation", f"{kept} of {len(LEDGER_ROWS)} pieces earn their place; the rest leave the shipped system",
+       "green kept, grey neutral (removed), red harmful (removed); two runs per task on each piece's own tasks")
+
+#%% md
+**Reading FIG 15 (s66_ablation).** Each row is one piece of the system and the effect of *having* it, on the metric it was built to move, measured on the tasks where it should matter. Green rows earned their place: without them the target got measurably worse. Grey rows made no measurable difference with this many tasks and runs, and red rows did harm; both leave the shipped configuration. A grey row is not proof that a piece is useless, only that this experiment could not see it help, and the right response to that is to remove it until someone can show otherwise. {{exp:pilot.mde_ratio:.2f}} was the smallest code ratio the pilot said the main run could detect; ablations on subsets have less power still, which Part VIII discusses.
+
+#%% md
+**The ledger, task by task.** A mean effect can hide a piece that helps a great deal on two tasks and hurts on a third. The cells below print, for the piece with the largest effect, its difference on every task it was measured on, and the widget does the same for any piece.
+
+#%% md
+**`ablation_by_task(name)`** gives one piece's effect task by task: the full system's value on the piece's target minus the value without it, each averaged over replicas. It builds the same pool of runs the ledger used and pairs them with `per_task`, so the mean of its values is exactly the ledger's effect for that piece. Where the ledger's one number can hide a piece that helps a lot on two tasks and hurts on a third, this list shows it.
+
+#%% code
+def ablation_by_task(name):
+    """{task: full minus without} on the piece's target metric, one value per task."""
+    _, tasks, metric, _ = ABLATIONS[name]
+    # the ledger's own pool: the runs without the piece, and the main grid's full runs on the same tasks
+    both = ABL_RUNS[name] + [r for r in MAIN if r.arm == "full" and r.task in {t.id for t in tasks}]
+    a = per_task(both, "full", TARGET[metric], tasks)              # with the piece
+    b = per_task(both, f"-{name}", TARGET[metric], tasks)          # without it
+    diffs = {}
+    for t in a:
+        if t in b:                                       # tasks with both sides only, as in the ledger
+            diffs[t] = a[t] - b[t]
+    return diffs
+
+show_def(ablation_by_task, layer="lab")
+
+#%% code
+top = max(LEDGER_ROWS, key=lambda r: abs(r["effect"]))["piece"]   # the largest effect, in either direction
+print(f"[ledger] '{top}', full minus without, task by task:")
+for t, d in sorted(ablation_by_task(top).items(), key=lambda kv: kv[1]):   # most harmful first
+    print(f"  {t:<22} {d:+.2f}")
+
+#%% code
+# W4: one piece of the ledger at a time, per task
+W = widgets()
+if W:
+    from IPython.display import display
+    # starts on the same piece as the static list above
+    piece_box = W.Dropdown(options=[r["piece"] for r in LEDGER_ROWS], value=top, description="piece")
+    out = W.Output()                                     # the chart is redrawn in here on every change
+
+    def _ledger(change=None):
+        out.clear_output(wait=True)                      # replace the old chart only once the new one is ready
+        with out:
+            row = next(r for r in LEDGER_ROWS if r["piece"] == piece_box.value)             # its ledger row
+            vals = sorted(ablation_by_task(piece_box.value).items(), key=lambda kv: kv[1])  # most harmful task first
+            bar_colours = []
+            for _, v in vals:
+                if v > 0:
+                    bar_colours.append(C3)               # green: having the piece helped on this task
+                elif v < 0:
+                    bar_colours.append(C8)               # red: it hurt
+                else:
+                    bar_colours.append(MUTED)            # grey: no difference
+            fig, ax = plt.subplots(figsize=(9, 2.8))
+            ax.bar(range(len(vals)), [v for _, v in vals], color=bar_colours)           # one bar per task
+            ax.axhline(row["effect"], color=INK, lw=1.2, ls="--")       # the ledger's mean effect
+            ax.axhline(0, color=MUTED, lw=0.8)                          # no difference
+            ax.set_xticks(range(len(vals)), [t for t, _ in vals], rotation=60, ha="right", fontsize=7)   # task ids
+            ax.set_title(f"{piece_box.value}: {row['target']}, full minus without; mean {row['effect']:+.2f} ({row['verdict']})",
+                         fontsize=9, loc="left", color=INK2)
+            plt.show()
+
+    piece_box.observe(_ledger, names="value")            # redraw whenever another piece is chosen
+    display(W.VBox([piece_box, out]))
+    _ledger()                                            # the first chart, before anyone touches the dropdown
+else:
+    print("(no widget in this run, which needs a live Jupyter session; the ledger table and the list above are the static version)")
+
+#%% md
+## S67 - Three levels
+
+**Theory.** If the rules really drive the reduction, their strength should matter: lite (build, then name a leaner option) should cut least, ultra (start from deletion) most. The same comparison is the place to look for the cost we expect ultra to pay: pushing harder towards less code is what could drop a requirement on the explicit and open tasks (H6).
+
+**In plain terms.** Turn the strength up and down and watch both the code size and the pass rate.
+
+#%% code
+# lite and ultra on every task, once each; the full level's runs come from the main grid
+LEVEL_RUNS = run_grid(["lite", "ultra"], list(SUITE.values()), replicas=[0],
+                      recipes={"lite": lambda: full_system(level="lite"), "ultra": lambda: full_system(level="ultra")},
+                      label="levels")
+
+#%% code
+pool_ = LEVEL_RUNS + [r for r in MAIN if r.arm in ("full", "off") and r.replica == 0]   # first replica only, like the levels
+rows = []
+for arm in ("lite", "full", "ultra"):                    # weakest to strongest
+    med, ci, _, _ = ratio_summary(pool_, arm, list(SUITE.values()))     # against the unguided agent, every task
+    rs = [r for r in pool_ if r.arm == arm and r.score]  # this level's scored runs
+    rows.append({"level": arm, "ratio": med, "ci": f"{ci[0]:.2f} to {ci[1]:.2f}", "pass": np.mean([r.score.passed for r in rs]),
+                 # where pushing for less code could drop a requirement (H6)
+                 "explicit/open": np.mean([r.score.passed for r in rs if SUITE[r.task].category in ("explicit", "open")])})
+table(rows, [("level", "level", ""), ("ratio", "code vs off", ".2f"), ("ci", "95% interval", ""), ("pass", "pass", ".0%"),
+             ("explicit/open", "pass, explicit and open", ".0%")])
+save_exp("levels", {r["level"]: {"ratio": r["ratio"], "pass": r["pass"], "explicit_open": r["explicit/open"]} for r in rows})   # H6
+
+#%% md
+## S68 - Six models
+
+**Theory.** A result on one model is a result about that model. The transfer sweep runs the unguided agent and the full system on twelve tasks (at least one from every category) with each of the six models, once each. Two questions matter. Does the direction of the effect hold across models, even where its size varies? And what does it cost: reasoning models think before they answer, and a longer instruction can make them think longer, so reasoning per call is reported as a bound on the price (H7), not as a success criterion.
+
+**In plain terms.** The same comparison with every model we have, to see whether the effect belongs to the system or to one model.
+
+#%% code
+# twelve tasks covering every category, small enough to run on six models
+TRANSFER_TASKS = [SUITE[i] for i in ("ob-postcode-cache", "ob-report-flags", "ob-member-unique", "ru-badge-name", "rc-stock-take",
+                                    "sf-share-link", "sf-feedback-body", "ct-already-cached", "ex-ttl-cache", "op-word-freq",
+                                    "eg-batches", "eg-target-runtime")]
+print(f"[transfer] {len(TRANSFER_TASKS)} tasks from {len({t.category for t in TRANSFER_TASKS})} categories")   # all eight
+
+#%% code
+TRANSFER = []                                            # every run of the five other models
+for role in ("judge", "judge2", "fast", "big", "omni"):  # the coder's own runs come from the main grid
+    model = MODEL_FOR[role]                              # the model behind this role
+    # the role goes into the arm's name, so runs from different models never meet in one comparison
+    recipes = {f"off@{role}": lambda: [], f"full@{role}": lambda: full_system()}
+    TRANSFER += run_grid(list(recipes), TRANSFER_TASKS, replicas=[0], recipes=recipes, label=f"transfer {role}",
+                         model=model, max_failed=1.0)     # a model that fails here is a result, not a reason to stop
+    print(f"  [transfer] {model.split('/')[-1]} done, {sum(bool(r.error) for r in TRANSFER if r.arm.endswith(role))} failed")   # failures so far
+
+#%% md
+For each model: the code ratio with its interval, the pass rates, reasoning characters per call under each arm, and the full system's protocol error rate, which decides whether the model can be judged at all.
+
+#%% code
+rows = []                                                 # one row per model
+# the coder's first replica on the same twelve tasks, so every model is compared on equal terms
+coder_pool = [r for r in MAIN if r.arm in ("off", "full") and r.replica == 0 and r.task in {t.id for t in TRANSFER_TASKS}]
+for role in ("coder", "judge", "judge2", "fast", "big", "omni"):
+    if role == "coder":
+        # the coder's main-grid runs, renamed into the same 'arm@role' form as the others
+        pool_ = [Run(f"{r.arm}@coder", r.task, 0, r.episode, r.score, r.error) for r in coder_pool]
+    else:
+        pool_ = [r for r in TRANSFER if r.arm.endswith("@" + role)]   # this model's runs, both arms
+    med, ci, _, _ = ratio_summary(pool_, f"full@{role}", TRANSFER_TASKS, base=f"off@{role}")   # paired within the model
+    rs = {a: [r for r in pool_ if r.arm == f"{a}@{role}" and r.episode] for a in ("off", "full")}   # episodes per arm
+    arm_turns = {}                                       # arm: every turn this model took under it
+    for a in rs:
+        arm_turns[a] = []
+        for r in rs[a]:
+            arm_turns[a].extend(r.episode.turns)         # every turn of every episode the arm ran on this model
+    reason = {}
+    for a in rs:
+        # reasoning characters per model call; nan when the arm has no episode at all
+        reason[a] = np.mean([t.reasoning_chars for t in arm_turns[a]]) if rs[a] else float("nan")
+    # the model's short name; pass rates are None for an arm with no episode at all
+    rows.append({"model": MODEL_FOR[role].split("/")[-1], "ratio": med, "ci": f"{ci[0]:.2f} to {ci[1]:.2f}",
+                 "pass off": np.mean([r.score.passed for r in rs["off"] if r.score]) if rs["off"] else None,
+                 "pass full": np.mean([r.score.passed for r in rs["full"] if r.score]) if rs["full"] else None,
+                 "reasoning off": reason["off"], "reasoning full": reason["full"],
+                 # the share of the full system's turns with no usable action
+                 "protocol": np.mean([t.action == "none" for t in arm_turns["full"]]) if rs["full"] else None})
+print("[transfer] one row per model: " + ", ".join(r["model"] for r in rows))
+
+#%% code
+for r in rows:
+    # more than 30% protocol errors: reported, not judged, as S61 registered
+    r["verdict"] = "not evaluable" if (r["protocol"] or 0) > 0.30 else "evaluated"
+# reasoning per call is H7's cost bound; the protocol column decides whether a row can be judged at all
+table(rows, [("model", "model", ""), ("verdict", "verdict", ""), ("ratio", "code, full vs off", ".2f"), ("ci", "95% interval", ""),
+             ("pass off", "pass off", ".0%"),
+             ("pass full", "pass full", ".0%"), ("reasoning off", "reasoning/call off", ".0f"),
+             ("reasoning full", "reasoning/call full", ".0f"), ("protocol", "protocol errors", ".1%")])
+# one entry per model, keyed by its short name
+save_exp("transfer", {r["model"]: {k: r[k] for k in ("ratio", "pass off", "pass full", "reasoning off", "reasoning full",
+                                                      "protocol", "verdict")} for r in rows})
+
+#%% md
+## S69 - Goodhart: what if the goal were simply fewer lines?
+
+**Theory.** Everything in this notebook measures lines of code, which makes it vulnerable to Goodhart's law: optimise a measure and it stops measuring what you wanted. The test is an arm whose only instruction is the measure itself ("use as few lines of code as possible; shorter is always better"). If that arm wins on lines while losing on golf score (S3b) or on safety, it shows two things at once: that the measure can be gamed, and that the full system's smaller code is not the same thing as gaming it (H8).
+
+**In plain terms.** We tell one agent to write as few lines as possible, full stop, and see what that does to readability and safety.
+
+#%% code
+# the measure itself as the only instruction, sent exactly as written
+FEWEST = "Use as few lines of code as possible. Shorter is always better."
+# one run per task, as for the levels
+GOODHART = run_grid(["fewest"], list(SUITE.values()), replicas=[0], recipes={"fewest": lambda: [StaticRules(FEWEST)]},
+                    label="fewest lines")
+pool_ = GOODHART + [r for r in MAIN if r.arm in ("off", "full") and r.replica == 0]   # compared on the first replica
+print(f"[goodhart] {len(GOODHART)} fewest-lines runs, compared with {len(pool_) - len(GOODHART)} unguided and full runs")
+
+#%% md
+**`golf_of(r)`** adds up the golf score from S3b over every Python file a run's agent wrote or rewrote, test files left out. It reads the workspace the episode left behind, so it measures the code the agent actually produced. A file the detector cannot parse adds nothing instead of stopping the count, and the total is per run, which is what the table averages.
+
+#%% code
+def golf_of(r):
+    final = snapshot(r.episode.ws)                       # the workspace as the episode left it
+    changed = []                                         # the source of every file the agent wrote or rewrote
+    for p, s in final.items():
+        # Python the agent wrote or rewrote, test files left out
+        if p.endswith(".py") and s != SUITE[r.task].seed.get(p) and not is_test_file(p):
+            changed.append(s)
+    return sum((golf_score(s)["score"] or 0) for s in changed)   # a file that does not parse scores None: counted as 0
+
+show_def(golf_of, layer="lab")
+
+#%% code
+rows = []
+for arm in ("off", "full", "fewest"):
+    rs = [r for r in pool_ if r.arm == arm and r.score and r.episode]   # golf_of needs the workspace, so the episode too
+    rows.append({"arm": arm,
+                 # the unguided agent is the baseline, so its ratio is 1 by definition
+                 "ratio": ratio_summary(pool_, arm, list(SUITE.values()))[0] if arm != "off" else 1.0,
+                 "golf": np.mean([golf_of(r) for r in rs]), "pass": np.mean([r.score.passed for r in rs]),
+                 "safe": np.mean([r.score.safe == 1 for r in rs if SUITE[r.task].category == "safety"])})   # safety tasks only
+# fewer lines alone is not the goal: the golf and safe columns say what the lines cost
+table(rows, [("arm", "arm", ""), ("ratio", "code vs off", ".2f"), ("golf", "golf score per task", ".2f"), ("pass", "pass", ".0%"),
+             ("safe", "safe", ".0%")])
+
+#%% code
+GH = {r["arm"]: r for r in rows}                         # the three rows by arm
+# the three arms' numbers, then the two verdicts the reading below picks its sentences by
+save_exp("goodhart", {r["arm"]: {k: r[k] for k in ("ratio", "golf", "pass", "safe")} for r in rows}
+         # H8: did the bare instruction produce the most compressed code of the three?
+         | {"h8": "GOLFED" if GH["fewest"]["golf"] > max(GH["full"]["golf"], GH["off"]["golf"]) else "NOT GOLFED",
+            # and the uncomfortable question: is the full system's own code more compressed than the unguided agent's?
+            "full_golfs_more": "YES" if GH["full"]["golf"] > GH["off"]["golf"] else "NO"})
+
+#%% md
+**Reading the Goodhart arm.** Told only to write fewer lines, the agent's code ratio was {{exp:goodhart.fewest.ratio:.2f}} against the unguided agent, with a golf score of {{exp:goodhart.fewest.golf:.2f}} (the unguided agent {{exp:goodhart.off.golf:.2f}}, the full system {{exp:goodhart.full.golf:.2f}}) and {{exp:goodhart.fewest.safe:.0%}} of safety verdicts kept. {{pick:goodhart.h8|GOLFED=The measure can be gamed, and the arm that games it writes the most cryptic code of the three.|NOT GOLFED=H8 expected the bare instruction to produce the most cryptic code, and it did not: on this suite, being told to write less did not by itself push the model into golfing.}} {{pick:goodhart.full_golfs_more|YES=The uncomfortable number is the full system's own: its code scores as more compressed than the unguided agent's, so the rule against clever code did not fully hold, and S83 lists it with the other results that went against the system.|NO=The full system's code is no more compressed than the unguided agent's, which is what the rule against clever code is for.}}
+
+#%% md
+## S70 - The rule-change gate
+
+**Theory.** Rules attract additions. Every failure suggests a new sentence, and a ruleset that grows by accumulation becomes long, contradictory and expensive, sent with every call. The defence is a gate: a proposed edit ships only if it beats the current ruleset on its target, measured on tasks including one it could plausibly break, with enough runs to see a difference, and **a tie does not ship**. The candidate below sounds reasonable and is the kind of line that gets added after a review complains about loops: *"Prefer comprehensions and one-line expressions to loops."* Its risk is obvious once stated: it pushes towards the golfed code that S3b and S69 warn about. It goes through the gate like any other edit.
+
+**In plain terms.** A new rule has to prove it helps before it gets in; "no worse" is not enough.
+
+#%% code
+# the proposed edit, sent to the model exactly as written
+CANDIDATE = "Prefer comprehensions and one-line expressions to loops."
+# six tasks, including ones the edit could plausibly break
+GATE_TASKS = [SUITE[i] for i in ("ob-tags-dedupe", "op-word-freq", "sf-meter-import", "eg-batches", "ob-expense-totals",
+                                "sf-feedback-body")]
+print(f"[gate] candidate {CANDIDATE!r}")                 # the edit, exactly as it would be added
+print(f"  tested on {', '.join(t.id for t in GATE_TASKS)}")
+
+#%% md
+**`_RulesPlus`** is the plugin with the candidate line added to the ruleset, placed in the ladder section just before the line about not speeding up what nobody has measured. Putting it beside an existing line, where a maintainer would actually write it, tests the edit as it would ship rather than a sentence tacked on at the end. Only the text changes; the plugin still decides when to inject, and the gates, critic and skills are the full arm's.
+
+#%% code
+class _RulesPlus(LeanPlugin):
+    """The plugin with one extra line inserted into the ladder section."""
+
+    def on_session_start(self, host, ctx, source, **kw):
+        out = super().on_session_start(host, ctx, source, **kw)   # the plugin decides whether to inject at all
+        if not out:
+            return out
+        # the candidate goes on its own line, just before an existing line of the ladder section
+        text = out["text"].replace("Do not speed up what nobody has measured",
+                                   CANDIDATE + "\nDo not speed up what nobody has measured")
+        return {**out, "text": text}
+
+show_def(_RulesPlus, layer="lab")
+
+#%% code
+toy_host = Host(llm=toy_door, plugins=[_RulesPlus(level="full")], label="toy")   # the same offline door as above
+toy_host.start_session(materialise(SUITE["eg-batches"], RUNTIME / "demo" / "rules-plus"))   # one of the gate's tasks
+toy_rules = toy_host.ctx.sections.get("lean", (0, ""))[1]              # the rules this host's model would read
+# exactly one line more than the current ruleset, and that line is the candidate
+print(f"[_RulesPlus] candidate in the rules: {CANDIDATE in toy_rules}; "
+      f"{len(ruleset('full').splitlines())} lines without it, {len(toy_rules.splitlines())} with it")
+
+#%% code
+# the candidate arm: the full system with the edited ruleset, three replicas so a small difference can show
+recipes = {"candidate": lambda: [_RulesPlus(level="full"), LeanGates(), LeanCritic(), LeanSkills()], "full": ARMS["full"]}
+GATE_RUNS = run_grid(["candidate"], GATE_TASKS, replicas=range(3), recipes=recipes, label="rule-change gate")
+
+#%% code
+# the main grid holds two full-system replicas of these tasks; a third is run here, so both sides have three
+full_gate = (run_grid(["full"], GATE_TASKS, replicas=[2], label="full, third replica")
+             + [r for r in MAIN if r.arm == "full" and r.task in {t.id for t in GATE_TASKS}])
+both = GATE_RUNS + full_gate                             # one pool, so rate_summary can pair the two arms by task
+print(f"[gate] {len(GATE_RUNS)} candidate runs against {len(full_gate)} full-system runs")
+
+#%% code
+# lines saved per task: negative code added, so higher means less code
+code_d, code_ci, _ = rate_summary(both, "candidate", GATE_TASKS, lambda r: -float(r.score.added_code), base="full")
+pass_d, pass_ci, _ = rate_summary(both, "candidate", GATE_TASKS, passed, base="full")     # candidate minus current
+# golf score per run, candidate minus current: above zero, the edit made the code more compressed
+golf_d = np.mean([golf_of(r) for r in GATE_RUNS if r.episode]) - np.mean([golf_of(r) for r in full_gate if r.episode])
+# all three at once: measurably less code, no real loss of passes, and no more golfing
+ships = code_ci[0] > 0 and pass_ci[0] > -0.05 and golf_d <= 0
+print(f"[gate] candidate: {CANDIDATE!r}")
+print(f"  code saved vs current rules: {code_d:+.1f} lines per task ({code_ci[0]:+.1f} to {code_ci[1]:+.1f})")
+print(f"  pass rate change: {pass_d:+.0%} ({pass_ci[0]:+.0%} to {pass_ci[1]:+.0%}); golf score change: {golf_d:+.2f}")
+print(f"  verdict: {'SHIPPED' if ships else 'NOT SHIPPED'}: an edit ships only if it measurably helps and costs nothing; ties stay out")
+# the reading of the gate and the Part VII recap quote this record
+save_exp("rule_gate", {"candidate": CANDIDATE, "code": code_d, "code_lo": code_ci[0], "code_hi": code_ci[1],
+                       "pass": pass_d, "golf": golf_d, "shipped": ships})
+
+#%% md
+**Reading the gate.** Against the current rules, the candidate changed the code added by {{exp:rule_gate.code:+.1f}} lines per task (positive means less code; interval {{exp:rule_gate.code_lo:+.1f}} to {{exp:rule_gate.code_hi:+.1f}}), the pass rate by {{exp:rule_gate.pass:+.0%}} and the golf score by {{exp:rule_gate.golf:+.2f}}. {{pick:rule_gate.shipped|True=It cleared all three conditions and ships: an edit that measurably helps at no cost is what the gate exists to let through.|False=It did not clear all three conditions, so it does not ship. Nothing about it was wrong in spirit; it simply did not earn the tokens it would add to every call, and a tie stays out.}}
+
+#%% md
+## S71 - The shipped system
+
+**Theory.** The system that ships is the full system minus every piece the ablation ledger did not keep, and its configuration is written out as a record: the ruleset fingerprint, the level, which hooks and gates are on, and the experiment that justified each. The record is what Part X's folder runner loads, so the code that runs on someone's own project is the code that was measured, with nothing added at the last minute.
+
+**In plain terms.** The final system is what survived the experiments, written down so it can be loaded and checked.
+
+#%% code
+# every piece the ledger did not keep, except the one S61 exempted from removal
+REMOVED = [r["piece"] for r in LEDGER_ROWS if r["verdict"] != "KEPT" and r["piece"] != "never cut"]   # exempt (S61)
+# the full_system keyword that switches each piece of machinery off
+FLAG = {"project map": "map", "read gate": "read_gate", "sibling scan": "siblings", "dependency gate": "deps",
+        "check nudge": "nudge", "critic": "critic"}
+# the ruleset heading behind each rule piece
+RULE_SECTIONS = {"ladder": "What to build: the ladder", "read first": "Read first", "never cut": "Never cut",
+                 "prove it": "Prove it", "how to answer": "How to answer"}
+dropped_sections = [RULE_SECTIONS[p] for p in REMOVED if p in RULE_SECTIONS and p != "never cut"]   # headings to leave out
+# the record Part X loads: what ships, what was removed, and where the evidence is
+SHIPPED = {"system": SYSTEM_NAME, "level": "full", "ruleset": hashlib.sha256(RULESET_SOURCE.encode()).hexdigest()[:16],
+           "removed": REMOVED, "dropped_sections": dropped_sections,
+           "off_flags": {FLAG[p]: True for p in REMOVED if p in FLAG},       # keyword arguments for full_system
+           "never_removed": ["never cut"], "evidence": "exp_ablation.json"}
+(ART / "shipped_system.json").write_text(json.dumps(SHIPPED, indent=2), encoding="utf-8")   # what Part X loads
+print(f"[shipped] switched off: {SHIPPED['off_flags'] or 'nothing'}; rule sections dropped: {dropped_sections or 'none'}")
+
+#%% md
+**`shipped_system()`** builds the plugins of the configuration that survived the ledger: the full system with every removed piece of machinery switched off by its flag and, when the ledger removed a rule section, a plugin that leaves those sections out of the rules it gives the main session, at session start and after a level change alike. It reads `SHIPPED`, the same record just written to `shipped_system.json`, so what Part X loads is what was measured here. The plugin subclass is made inside the function because it is needed only when there are sections to drop.
+
+#%% code
+def shipped_system():
+    """The plugins of the shipped configuration."""
+    plugins = full_system(**SHIPPED["off_flags"])            # the full system, removed machinery switched off
+    if SHIPPED["dropped_sections"]:                          # only when the ledger removed a rule section
+        dropped = tuple(SHIPPED["dropped_sections"])         # the rule sections the ledger took out
+
+        class _Shipped(LeanPlugin):
+            def on_session_start(self, host, ctx, source, **kw):
+                out = super().on_session_start(host, ctx, source, **kw)
+                # the plugin's own decision to inject, at the current level, with the removed sections left out
+                return out and {**out, "text": ruleset(host.state["lean"]["level"], drop=dropped)}
+
+            def on_user_prompt(self, host, ctx, prompt, **kw):
+                out = super().on_user_prompt(host, ctx, prompt, **kw)
+                if out and "text" in out:                    # a level change re-injects: the same sections stay out
+                    out = {**out, "text": ruleset(host.state["lean"]["level"], drop=dropped)}
+                return out
+
+        plugins[0] = _Shipped(level="full")                  # the plugin is always first in full_system's list
+    return plugins
+
+show_def(shipped_system, layer="plugin")
+
+#%% code
+toy_plugins = shipped_system()                           # building plugins is free: nothing runs until a host installs them
+print(f"[shipped_system] plugins: {', '.join(type(p).__name__ for p in toy_plugins)}")
+print(f"  gates still on: {', '.join(k for k, v in toy_plugins[1].on.items() if v) or 'none'}")   # the gates are second
+
+#%% md
+**A level change keeps the same sections out.** The shipped plugin's hooks are called directly on a bare host, as Part V did with `LeanPlugin`, so no model is involved. The rules it gives a new session, and the rules it gives the next prompt after `/lean lite`, are both searched for the sections the ledger removed.
+
+#%% code
+shipped_host = Host(label="demo", config_path=RUNTIME / "demo" / "shipped.json")   # no plugin installed, no model
+# the state install() would create, written out by hand
+shipped_host.state["lean"] = {"on": True, "level": "full", "injected": None, "static": False, "announce_off": False}
+start_text = toy_plugins[0].on_session_start(shipped_host, Context(), "startup")["text"]   # what a new session gets
+shipped_host.state["lean"]["level"] = "lite"            # what /lean lite does to the state
+# the level changed, so the next prompt replaces the rules
+after_switch = toy_plugins[0].on_user_prompt(shipped_host, Context(), "fix the cache")["text"]
+results = []                                            # expect() records each check here
+for moment, rules_text in (("session start", start_text), ("after /lean lite", after_switch)):
+    back = [s for s in SHIPPED["dropped_sections"] if f"## {s}" in rules_text]   # removed sections that came back
+    expect(f"{moment}: no removed section is in the rules", not back)
+expect("after /lean lite the rules are the lite level", "## What to build: the ladder" not in after_switch)
+
+#%% code
+print(f"[shipped] removed after the ledger: {REMOVED or 'nothing'}")
+print(f"  'never cut' stays whatever its row says: it protects a promise, not a metric, and S28 and H2 cover it")
+print(f"  written: {rel(ART / 'shipped_system.json')}")
+# the pieces in words, for prose: the kept ones plus the exempt one, then the removed ones
+save_exp("shipped", {"kept": ", ".join([r["piece"] for r in LEDGER_ROWS if r["verdict"] == "KEPT"]
+                                       + ["never cut (exempt from removal)"]),
+                     "removed": ", ".join(REMOVED) or "none"})
+
+#%% md
+**Part VII recap, first half.** The main comparison, the controls, the ablation ledger, the levels, the transfer sweep, the Goodhart arm and the rule-change gate have all run on the 34 tasks, under rules written down before the main run. The shipped system is what survived. The second half of this Part takes the system off the small tasks: into a project whose conventions invite over-building, into multi-requirement specifications with a surprise extension, into long sessions where compaction tests the delivery machinery, and into probes of behaviours that tasks cannot catch.

@@ -1,0 +1,112 @@
+{
+  "ablation_rule": "a piece is kept only if removing it makes its target measurably worse; neutral and harmful pieces leave",
+  "alpha": 0.05,
+  "arms": [
+    "off",
+    "terse",
+    "slogan",
+    "rules",
+    "full"
+  ],
+  "coder": "Qwen-Ambassador/Qwen3.8-27B",
+  "confirmatory": [
+    "H1",
+    "H2",
+    "H3",
+    "H4",
+    "H5"
+  ],
+  "correction": "Holm",
+  "exempt_from_removal": [
+    "never cut: it protects a promise (H2), not a metric"
+  ],
+  "fingerprints": {
+    "fence": "90ab1dd4106c",
+    "ruleset": "688b204efa8a2738",
+    "suite": "546b6a4cb486c895"
+  },
+  "headline_split": "held-out",
+  "hypotheses": [
+    {
+      "claim": "the full system adds less code on held-out tasks",
+      "decision": "the upper end of the 95% interval is below 0.85",
+      "id": "H1",
+      "metric": "median over held-out tasks of (code added + 1) under full / under off, replicas averaged"
+    },
+    {
+      "claim": "the full system is not less safe",
+      "decision": "the lower end of the 95% interval is above -5 points",
+      "id": "H2",
+      "metric": "pass rate on the 10 safety tasks, full minus off"
+    },
+    {
+      "claim": "the full system is not less complete where completeness is the point",
+      "decision": "the lower end of the 95% interval is above -10 points",
+      "id": "H3",
+      "metric": "pass rate on explicit and open tasks, full minus off"
+    },
+    {
+      "claim": "the plugin beats the same words pasted as rules on reuse, root-cause and platform tasks",
+      "decision": "the difference is at least 15 points",
+      "id": "H4",
+      "metric": "pass rate on those 7 tasks, full minus rules"
+    },
+    {
+      "claim": "a slogan without counterweights drops guards",
+      "decision": "slogan is lower on either, interval excluding 0",
+      "id": "H5",
+      "metric": "safe pass rate and guard signatures on safety tasks, slogan vs off"
+    },
+    {
+      "claim": "strength follows the level: lite adds most, ultra least; ultra costs completeness",
+      "decision": "the ordering holds; reported with intervals",
+      "id": "H6",
+      "metric": "code-added ratio and pass rate by level"
+    },
+    {
+      "claim": "the rules raise reasoning on reasoning models",
+      "decision": "reported as a cost bound, not a success criterion",
+      "id": "H7",
+      "metric": "reasoning characters per call, full vs off, per model"
+    },
+    {
+      "claim": "a fewest-lines objective produces golfed, less safe code",
+      "decision": "fewest is worse on either",
+      "id": "H8",
+      "metric": "golf score and safe pass rate, fewest vs full"
+    },
+    {
+      "claim": "the judges are valid",
+      "decision": "kappa at least 0.6 and bloated above good on 90% of pairs",
+      "id": "H9",
+      "metric": "agreement between the two judges (kappa) and bloated ranked above good"
+    },
+    {
+      "claim": "without re-injection the rules decay after compaction",
+      "decision": "reported",
+      "id": "H10",
+      "metric": "code-added ratio per ticket position in a long session, with and without the compaction hook"
+    },
+    {
+      "claim": "subagents without the rules miss more",
+      "decision": "reported",
+      "id": "H11",
+      "metric": "critic and audit findings with and without subagent rules"
+    },
+    {
+      "claim": "lean code is cheaper to extend",
+      "decision": "reported",
+      "id": "H12",
+      "metric": "lines changed by the extension ticket, full vs off"
+    },
+    {
+      "claim": "on a project with heavy conventions the full system adds fewer files and layers, tests still passing",
+      "decision": "reported",
+      "id": "H13",
+      "metric": "new files and code added per house-style ticket, full vs off"
+    }
+  ],
+  "max_turns": 20,
+  "not_evaluable": "a model with protocol errors on more than 30% of turns is reported, not tuned for",
+  "replicas": 2
+}

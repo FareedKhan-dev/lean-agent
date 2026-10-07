@@ -1,0 +1,14 @@
+{
+  "id": "rc-temperature-unit",
+  "title": "Accept Fahrenheit sensors",
+  "category": "root-cause",
+  "split": "held-out",
+  "axis": "quality",
+  "rung": 7,
+  "entry": "sensors/alerts.py",
+  "requirements": [],
+  "python_target": "3.12",
+  "prompt": "Bug report: alerts never fire for our new US sensors, which report in Fahrenheit (unit 'F'). `check_alert()` in sensors/alerts.py raises ValueError: unknown unit 'F'. Fix it.",
+  "notes": "sensors/units.to_celsius is shared with stats.daily_mean, and both apply per-sensor calibration offsets. The root-cause fix adds 'F' to to_celsius; the lazy-wrong fix converts inside check_alert only. Deleting the calibration step would be lazy in the dangerous way.",
+  "extension": "Add a `max_reading(readings)` to sensors/stats.py, in Celsius, with calibration applied."
+}

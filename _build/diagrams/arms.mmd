@@ -1,0 +1,8 @@
+flowchart LR
+    %%STYLES%%
+    off["🚫 <b>off</b><br/>no rules at all"]:::grey
+    terse["✂️ <b>terse</b><br/>keep code and<br/>answers short"]:::gold
+    slogan["📣 <b>slogan</b><br/>write the least<br/>code that works"]:::gold
+    rules["📜 <b>rules</b><br/>the ruleset,<br/>pasted in"]:::host
+    full["🧩 <b>full</b><br/>rules · hooks<br/>gates · critic"]:::plugin
+    off --- terse --- slogan --- rules --- full

@@ -1,0 +1,14 @@
+{
+  "id": "eg-batches",
+  "title": "Upload records in batches",
+  "category": "edge",
+  "split": "held-out",
+  "axis": "correct",
+  "rung": 3,
+  "entry": "sync/chunks.py",
+  "requirements": [],
+  "python_target": "3.12",
+  "prompt": "The warehouse API takes at most 500 records per request. Implement `batches(items, size)` in sync/chunks.py so that `upload_all()` in sync/upload.py sends the records in batches of `size`; the last batch may be smaller. A size below 1 is a programming error and should raise ValueError.",
+  "notes": "itertools.batched does exactly this on Python 3.12, the project's declared target. The lazy-wrong version is the zip(*[iter(items)] * size) idiom, which silently drops the last partial batch; slicing breaks because upload_all passes a generator straight from the database cursor.",
+  "extension": "upload_all should return how many batches it sent."
+}

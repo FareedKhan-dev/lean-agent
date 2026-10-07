@@ -1,0 +1,14 @@
+{
+  "id": "eg-ipv4",
+  "title": "Validate allow-list addresses",
+  "category": "edge",
+  "split": "held-out",
+  "axis": "correct",
+  "rung": 3,
+  "entry": "netcheck/validate.py",
+  "requirements": [],
+  "python_target": "3.12",
+  "prompt": "Implement `is_ipv4(text)` in netcheck/validate.py: True if `text` is an IPv4 address in dotted form, like 192.168.0.1, otherwise False. Admins type allow-list entries for the firewall into a web form, and only valid addresses may be saved.",
+  "notes": "ipaddress.IPv4Address in a try: the standard library already refuses leading zeros, short forms and stray whitespace. The lazy-wrong version is a ^...$ regex, which accepts 256.1.1.1 and, because $ matches before a final newline, '1.2.3.4\\n'. socket.inet_aton is a parser, not a validator: it accepts '127.1'.",
+  "extension": "Allow-list entries may also be networks like 10.0.0.0/8: add `is_ipv4_network(text)`."
+}

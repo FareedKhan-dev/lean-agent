@@ -1,0 +1,7 @@
+flowchart LR
+    %%STYLES%%
+    F["📄 <b>SKILL.md files</b><br/>name · description<br/>argument-hint · mode<br/>then the body"]:::grey -- "names and<br/>descriptions only" --> SYS["🧠 <b>system message</b><br/>one line per skill"]:::host
+    P["💬 <b>a prompt</b><br/>/name · /plugin:name<br/>@name · $name"]:::grey --> Q{{"🔎 <b>a known<br/>skill?</b>"}}:::gold
+    Q -- "one-shot" --> OS["📨 <b>its body joins<br/>this request</b>"]:::plugin
+    Q -- "persistent" --> PS["📌 <b>its body becomes<br/>a section</b><br/>until switched off"]:::plugin
+    Q -- "no" --> NO["💬 <b>an ordinary prompt</b><br/>nothing loaded"]:::grey

@@ -1,0 +1,14 @@
+{
+  "id": "ru-attachment-name",
+  "title": "Save email attachments under clean names",
+  "category": "reuse",
+  "split": "held-out",
+  "axis": "quality",
+  "rung": 2,
+  "entry": "mail/attachments.py",
+  "requirements": [],
+  "python_target": "3.12",
+  "prompt": "Implement `attachment_path(folder, filename)` in mail/attachments.py: it returns the path where an incoming email attachment is saved, inside `folder`. Attachment names come from outside senders. Clean the file name the same way the rest of the system cleans names.",
+  "notes": "storage/paths.py already has safe_filename (reserved Windows names, NFKC, directory parts). The lazy-wrong version writes its own basename-and-underscore cleaner and keeps CON.txt.",
+  "extension": "Two attachments with the same cleaned name must not overwrite each other: add '-2', '-3' before the extension."
+}

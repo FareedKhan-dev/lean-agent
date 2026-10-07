@@ -1,0 +1,29 @@
+{
+  "system": "lean-agent",
+  "level": "full",
+  "ruleset": "688b204efa8a2738",
+  "removed": [
+    "read first",
+    "prove it",
+    "how to answer",
+    "project map",
+    "read gate",
+    "sibling scan",
+    "dependency gate"
+  ],
+  "dropped_sections": [
+    "Read first",
+    "Prove it",
+    "How to answer"
+  ],
+  "off_flags": {
+    "map": true,
+    "read_gate": true,
+    "siblings": true,
+    "deps": true
+  },
+  "never_removed": [
+    "never cut"
+  ],
+  "evidence": "exp_ablation.json"
+}

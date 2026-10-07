@@ -1,0 +1,22 @@
+[project]
+name = "lean-agent"
+version = "1.0.0"
+description = "A coding agent that refuses to over-engineer, built and measured in one course notebook"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "numpy>=2.5",
+    "matplotlib>=3.11",
+    "ipykernel>=7.4",
+    "ipywidgets>=8.1",
+    "nbclient>=0.11",
+    "nbformat>=5.11",
+]
+
+[dependency-groups]
+diagrams = [
+    "pillow>=12.3",     # only for re-rendering the diagrams (_build/render_diagrams.py)
+]
+
+[tool.uv]
+package = false

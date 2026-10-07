@@ -1,0 +1,23 @@
+{
+  "bloat": [
+    {"id": 1, "file": "invoicing/models.py", "symbol": "BaseInvoiceStore", "kind": "an interface with one implementation", "fix": "delete it; MemoryInvoiceStore needs no base class"},
+    {"id": 2, "file": "invoicing/store.py", "symbol": "StoreFactory", "kind": "a factory with one product", "fix": "call MemoryInvoiceStore() directly"},
+    {"id": 3, "file": "invoicing/settings.py", "symbol": "InvoiceSettings", "kind": "a settings class for values that never change", "fix": "two module constants"},
+    {"id": 4, "file": "invoicing/totals.py", "symbol": "round_half_up", "kind": "hand-rolled standard library", "fix": "Decimal.quantize(Decimal('0.01'), ROUND_HALF_UP)"},
+    {"id": 5, "file": "invoicing/totals.py", "symbol": "_invoice_total", "kind": "a function that only forwards", "fix": "fold _invoice_total into invoice_total"},
+    {"id": 6, "file": "invoicing/dates.py", "symbol": "isoparse", "kind": "a dependency the standard library covers", "fix": "date.fromisoformat, and drop python-dateutil"},
+    {"id": 7, "file": "invoicing/dates.py", "symbol": "parse_issue_date", "kind": "a duplicate helper", "fix": "delete it; parse_issued does the same"},
+    {"id": 8, "file": "invoicing/legacy_csv.py", "symbol": "export_legacy", "kind": "a module nothing imports", "fix": "delete the file"},
+    {"id": 9, "file": "invoicing/flags.py", "symbol": "PDF_V2", "kind": "a flag nothing turns on", "fix": "delete the flag, the dead branch and _render_v2"},
+    {"id": 10, "file": "invoicing/send.py", "symbol": "attempts", "kind": "a retry around a call that cannot fail transiently", "fix": "append to the outbox directly"},
+    {"id": 11, "file": "invoicing/format.py", "symbol": "verbose", "kind": "a parameter nobody passes", "fix": "remove the parameter"},
+    {"id": 12, "file": "invoicing/format.py", "symbol": "ThreadPoolExecutor", "kind": "a thread pool for work that does no I/O", "fix": "a list comprehension"}
+  ],
+  "decoys": [
+    {"file": "invoicing/exporters.py", "symbol": "to_csv", "why": "called through getattr with a name built at run time; only the tests use it"},
+    {"file": "invoicing/exporters.py", "symbol": "to_json", "why": "called through getattr with a name built at run time"},
+    {"file": "invoicing/hooks.py", "symbol": "on_issue", "why": "loaded by importlib from a module name in app.py"},
+    {"file": "invoicing/templates.py", "symbol": "shout", "why": "called through a globals() lookup from the FILTERS table"},
+    {"file": "invoicing/checks.py", "symbol": "is_balanced", "why": "used only by the test suite"}
+  ]
+}

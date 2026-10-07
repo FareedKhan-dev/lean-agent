@@ -1,0 +1,3 @@
+# Every byte is fingerprinted (the task suite, the ruleset, the fence) and every model request is
+# looked up by its exact text, so git must never rewrite line endings on any platform.
+* -text

@@ -1,0 +1,9 @@
+flowchart LR
+    %%STYLES%%
+    L["➕ <b>a line the change added</b><br/>found by a diff against the seed"]:::grey --> Q{{"🔎 <b>first match wins</b>"}}:::gold
+    Q -- "① blank" --> B["⬜ <b>blank</b> · not counted"]:::grey
+    Q -- "② a whole-line comment" --> C["💬 <b>comment</b> · prose"]:::gold
+    Q -- "③ inside a docstring" --> D["📝 <b>docstring</b> · prose"]:::gold
+    Q -- "④ code in a test file" --> T["🧪 <b>test</b>"]:::plum
+    Q -- "⑤ code in the self-check" --> K["✅ <b>check</b> · asked for, so not charged as code"]:::plugin
+    Q -- "⑥ any other code" --> X["🧱 <b>code</b> · the number that matters"]:::host

@@ -1,0 +1,13 @@
+flowchart TB
+    %%STYLES%%
+    subgraph R1[" "]
+        direction LR
+        e1["🚀 <b>session_start</b><br/>startup · resume<br/>clear · compact"]:::host --> e2["💬 <b>user_prompt</b><br/>every request"]:::host --> e3["🧠 <b>pre_llm_call</b><br/>before each model call"]:::host
+    end
+    subgraph R2[" "]
+        direction LR
+        e4["🧰 <b>pre_tool</b><br/>may refuse an action"]:::gold --> e5["📄 <b>post_tool</b><br/>may add a note"]:::host --> e6["👥 <b>subagent_start</b><br/>a helper's own context"]:::plum
+    end
+    R1 --> R2
+    style R1 fill:none,stroke:none
+    style R2 fill:none,stroke:none

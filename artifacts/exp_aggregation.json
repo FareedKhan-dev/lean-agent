@@ -1,0 +1,31 @@
+{
+  "terse": {
+    "median ratio": 1.0,
+    "geometric mean": 1.0441,
+    "trimmed geometric mean": 0.9615,
+    "pooled ratio": 1.0,
+    "tasks where it wrote less": 0.44
+  },
+  "slogan": {
+    "median ratio": 1.0,
+    "geometric mean": 1.0522,
+    "trimmed geometric mean": 0.9923,
+    "pooled ratio": 0.991,
+    "tasks where it wrote less": 0.44
+  },
+  "rules": {
+    "median ratio": 0.9818,
+    "geometric mean": 0.9082,
+    "trimmed geometric mean": 0.9343,
+    "pooled ratio": 0.8761,
+    "tasks where it wrote less": 0.52
+  },
+  "full": {
+    "median ratio": 0.8846,
+    "geometric mean": 0.7891,
+    "trimmed geometric mean": 0.8198,
+    "pooled ratio": 0.7478,
+    "tasks where it wrote less": 0.56
+  },
+  "agrees": "yes"
+}

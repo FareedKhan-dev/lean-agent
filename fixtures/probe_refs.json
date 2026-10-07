@@ -1,0 +1,157 @@
+{
+ "leap year": {
+  "good": "def is_leap(year):\n    return year % 4 == 0 and (year % 100 != 0 or year % 400 == 0)\n",
+  "naive": "def is_leap(year):\n    return year % 4 == 0\n",
+  "why": "every fourth year, so 1900 and 2100 count as leap years"
+ },
+ "ipv4": {
+  "good": "import ipaddress\n\ndef is_ipv4(text):\n    try:\n        ipaddress.IPv4Address(text)\n        return True\n    except ValueError:\n        return False\n",
+  "naive": "import re\n\ndef is_ipv4(text):\n    return bool(re.match(r\"^\\d{1,3}(\\.\\d{1,3}){3}$\", text))\n",
+  "why": "a regex that accepts 256.1.1.1, and a trailing newline because $ matches before it"
+ },
+ "batches": {
+  "good": "from itertools import islice\n\ndef batches(items, size):\n    it = iter(items)\n    while chunk := list(islice(it, size)):\n        yield chunk\n",
+  "naive": "def batches(items, size):\n    for i in range(0, len(items), size):\n        yield items[i:i + size]\n",
+  "why": "slicing needs len(), so a generator fails"
+ },
+ "split bill": {
+  "good": "from decimal import Decimal\n\ndef split_bill(total, people):\n    base, extra = divmod(int(Decimal(total) * 100), people)\n    return [f\"{Decimal(base + (i < extra)) / 100:.2f}\" for i in range(people)]\n",
+  "naive": "def split_bill(total, people):\n    return [f\"{float(total) / people:.2f}\"] * people\n",
+  "why": "three equal shares of 33.33 lose a penny"
+ },
+ "median": {
+  "good": "import statistics\n\ndef median(numbers):\n    return statistics.median(numbers)\n",
+  "naive": "def median(numbers):\n    return sorted(numbers)[len(numbers) // 2]\n",
+  "why": "takes the upper middle value of an even list instead of the mean of the two"
+ },
+ "pages": {
+  "good": "def page_count(total, per_page):\n    return -(-total // per_page)\n",
+  "naive": "def page_count(total, per_page):\n    return total // per_page + 1\n",
+  "why": "one page too many whenever the items fill the last page exactly, and one page for none"
+ },
+ "casefold": {
+  "good": "def unique_ignoring_case(words):\n    seen, out = set(), []\n    for w in words:\n        if w.casefold() not in seen:\n            seen.add(w.casefold())\n            out.append(w)\n    return out\n",
+  "naive": "def unique_ignoring_case(words):\n    seen, out = set(), []\n    for w in words:\n        if w.lower() not in seen:\n            seen.add(w.lower())\n            out.append(w)\n    return out\n",
+  "why": "lower() keeps the sharp s, so Strasse and STRASSE stay different"
+ },
+ "safe join": {
+  "good": "import os\n\ndef upload_path(folder, filename):\n    name = os.path.basename(filename.replace(\"\\\\\", \"/\"))\n    if name in (\"\", \".\", \"..\"):\n        raise ValueError(\"not a file name\")\n    return os.path.join(folder, name)\n",
+  "naive": "import os\n\ndef upload_path(folder, filename):\n    return os.path.join(folder, filename)\n",
+  "why": "joins the user's name as given, so ../ climbs out of the folder"
+ },
+ "london hour": {
+  "good": "from datetime import datetime, timezone\nfrom zoneinfo import ZoneInfo\n\ndef london_hour(utc_iso):\n    t = datetime.fromisoformat(utc_iso).replace(tzinfo=timezone.utc)\n    return t.astimezone(ZoneInfo(\"Europe/London\")).hour\n",
+  "naive": "def london_hour(utc_iso):\n    month, hour = int(utc_iso[5:7]), int(utc_iso[11:13])\n    return (hour + (1 if 4 <= month <= 10 else 0)) % 24\n",
+  "why": "summer time by month, wrong on the days the clocks change"
+ },
+ "round half up": {
+  "good": "from decimal import Decimal, ROUND_HALF_UP\n\ndef round_money(x):\n    return Decimal(str(x)).quantize(Decimal(\"0.01\"), rounding=ROUND_HALF_UP)\n",
+  "naive": "def round_money(x):\n    return round(x, 2)\n",
+  "why": "round() works on the binary float, and 2.675 is stored as 2.67499..."
+ },
+ "csv row": {
+  "good": "import csv\nimport io\n\ndef csv_line(fields):\n    buf = io.StringIO()\n    csv.writer(buf, lineterminator=\"\").writerow(fields)\n    return buf.getvalue()\n",
+  "naive": "def csv_line(fields):\n    return \",\".join(fields)\n",
+  "why": "no quoting, so a comma inside a field becomes a new column"
+ },
+ "add param": {
+  "good": "from urllib.parse import urlencode, urlsplit, urlunsplit\n\ndef add_param(url, key, value):\n    s = urlsplit(url)\n    query = s.query + (\"&\" if s.query else \"\") + urlencode({key: value})\n    return urlunsplit(s._replace(query=query))\n",
+  "naive": "def add_param(url, key, value):\n    return url + (\"&\" if \"?\" in url else \"?\") + f\"{key}={value}\"\n",
+  "why": "appends after the #fragment and leaves & and spaces unescaped"
+ },
+ "day parse": {
+  "good": "from datetime import datetime\n\ndef parse_day(text):\n    return datetime.strptime(text, \"%Y-%m-%d\").date()\n",
+  "naive": "from datetime import date\n\ndef parse_day(text):\n    return date.fromisoformat(text)\n",
+  "why": "fromisoformat needs two-digit months and days, so 2026-3-7 is refused"
+ },
+ "flatten": {
+  "good": "def flatten(nested):\n    out = []\n    for item in nested:\n        if isinstance(item, list):\n            out.extend(flatten(item))\n        else:\n            out.append(item)\n    return out\n",
+  "naive": "from collections.abc import Iterable\n\ndef flatten(nested):\n    out = []\n    for item in nested:\n        if isinstance(item, Iterable):\n            out.extend(flatten(item))\n        else:\n            out.append(item)\n    return out\n",
+  "why": "a string is iterable, and so is each of its characters: endless recursion"
+ },
+ "add months": {
+  "good": "import calendar\nfrom datetime import date\n\ndef add_months(d, n):\n    y, m = divmod(d.month - 1 + n, 12)\n    year, month = d.year + y, m + 1\n    return date(year, month, min(d.day, calendar.monthrange(year, month)[1]))\n",
+  "naive": "from datetime import date\n\ndef add_months(d, n):\n    month = d.month - 1 + n\n    year, month = d.year + month // 12, month % 12 + 1\n    try:\n        return date(year, month, d.day)\n    except ValueError:\n        return date(year, month, 28)\n",
+  "why": "falls back to the 28th, which is wrong in a leap year"
+ },
+ "word count": {
+  "good": "import re\nfrom collections import Counter\n\ndef top_word(text):\n    return Counter(re.findall(r\"[a-z']+\", text.lower())).most_common(1)[0][0]\n",
+  "naive": "from collections import Counter\n\ndef top_word(text):\n    return Counter(text.split()).most_common(1)[0][0]\n",
+  "why": "Kettle, kettle. and KETTLE! count as three different words"
+ },
+ "quantity": {
+  "good": "def parse_quantity(text):\n    return int(text.strip())\n",
+  "naive": "def parse_quantity(text):\n    if not text.isdigit():\n        raise ValueError(f\"not a quantity: {text!r}\")\n    return int(text)\n",
+  "why": "isdigit() is False for ' 3 ', so a stray space rejects a valid quantity"
+ },
+ "email": {
+  "good": "def normalise_email(text):\n    return text.strip().lower()\n",
+  "naive": "def normalise_email(text):\n    return text.lower()\n",
+  "why": "keeps the spaces around the address"
+ },
+ "yes or no": {
+  "good": "def parse_yes_no(text):\n    return text.strip().lower() in (\"yes\", \"y\")\n",
+  "naive": "def parse_yes_no(text):\n    return text == \"yes\"\n",
+  "why": "'Yes ' with a capital and a space counts as no"
+ },
+ "tags": {
+  "good": "def split_tags(text):\n    return [t.strip() for t in text.split(\",\") if t.strip()]\n",
+  "naive": "def split_tags(text):\n    return [t.strip() for t in text.split(\",\")]\n",
+  "why": "empty tags from doubled and trailing commas"
+ },
+ "price": {
+  "good": "from decimal import Decimal\n\ndef price_pence(text):\n    return int(Decimal(text.strip().lstrip(\"£\")) * 100)\n",
+  "naive": "def price_pence(text):\n    return int(float(text) * 100)\n",
+  "why": "a pound sign is a crash"
+ },
+ "full name": {
+  "good": "def full_name(first, last):\n    return \" \".join(p for p in (first, last) if p)\n",
+  "naive": "def full_name(first, last):\n    return f\"{first} {last}\"\n",
+  "why": "prints 'Ann None' or a trailing space"
+ },
+ "phone": {
+  "good": "def phone_digits(text):\n    return \"\".join(c for c in text if c.isdigit())\n",
+  "naive": "def phone_digits(text):\n    return text.replace(\" \", \"\")\n",
+  "why": "keeps the dash"
+ },
+ "uk date": {
+  "good": "from datetime import datetime\n\ndef parse_uk_date(text):\n    return datetime.strptime(text.strip(), \"%d/%m/%Y\").date()\n",
+  "naive": "from datetime import datetime\n\ndef parse_uk_date(text):\n    return datetime.strptime(text, \"%d/%m/%Y\").date()\n",
+  "why": "a space before the date is a crash"
+ },
+ "first word": {
+  "good": "def first_word(text):\n    words = text.split()\n    return words[0] if words else \"\"\n",
+  "naive": "def first_word(text):\n    return text.split()[0]\n",
+  "why": "an empty message is a crash"
+ },
+ "percent": {
+  "good": "def percent_done(done, total):\n    return round(100 * done / total) if total else 0\n",
+  "naive": "def percent_done(done, total):\n    return 100 * done / total\n",
+  "why": "a user with no tasks is a division by zero"
+ },
+ "postcode check": {
+  "good": "import re\n\nPOSTCODE = re.compile(r\"[A-Z]{1,2}[0-9][A-Z0-9]? ?[0-9][A-Z]{2}\")\n\ndef check_postcode(text):\n    return bool(POSTCODE.fullmatch(text.strip().upper()))\n",
+  "naive": "import re\n\ndef check_postcode(text):\n    if not text:\n        return False, \"the postcode is empty\"\n    if not re.fullmatch(r\"[A-Z]{1,2}[0-9][A-Z0-9]? ?[0-9][A-Z]{2}\", text.upper()):\n        return False, \"that is not a UK postcode\"\n    return True, \"\"\n",
+  "why": "returns a tuple, which is true even when the postcode is wrong"
+ },
+ "permission": {
+  "good": "def can_edit(user, document):\n    return user[\"role\"] == \"admin\" or user[\"id\"] == document[\"owner_id\"]\n",
+  "naive": "def can_edit(user, document):\n    if user[\"role\"] == \"admin\":\n        return {\"allowed\": True, \"reason\": \"admin\"}\n    if user[\"id\"] == document[\"owner_id\"]:\n        return {\"allowed\": True, \"reason\": \"owner\"}\n    return {\"allowed\": False, \"reason\": \"neither admin nor owner\"}\n",
+  "why": "returns a dict, which is true for everyone"
+ },
+ "weekend": {
+  "good": "def is_weekend(day):\n    return day.weekday() >= 5\n",
+  "naive": "def is_weekend(day):\n    return {\"weekend\": day.weekday() >= 5, \"day\": day.strftime(\"%A\")}\n",
+  "why": "returns a dict, so every day is skipped"
+ },
+ "shippable": {
+  "good": "def can_ship(order):\n    return bool(order[\"paid\"] and order[\"items\"])\n",
+  "naive": "def can_ship(order):\n    if not order[\"paid\"]:\n        return False, \"not paid\"\n    if not order[\"items\"]:\n        return False, \"no items\"\n    return True, \"\"\n",
+  "why": "returns a tuple, so unpaid orders ship"
+ },
+ "sensor": {
+  "good": "READ_TIMEOUT_S = 2.5\nCALIBRATION_OFFSET_C = -0.4      # this sensor reads high; measured against a reference thermometer\n\ndef read_temperature(sensor):\n    try:\n        value = sensor.read(timeout=READ_TIMEOUT_S)\n    except TimeoutError:\n        value = sensor.read(timeout=READ_TIMEOUT_S)\n    return value + CALIBRATION_OFFSET_C\n",
+  "naive": "def read_temperature(sensor):\n    try:\n        value = sensor.read(timeout=2.5)\n    except TimeoutError:\n        value = sensor.read(timeout=2.5)\n    return value - 0.4\n",
+  "why": "works, but the timeout and the offset are buried in the code where nobody tuning it will look"
+ }
+}

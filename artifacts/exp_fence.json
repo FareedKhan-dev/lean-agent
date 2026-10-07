@@ -1,0 +1,13 @@
+{
+  "attacks": 29,
+  "as_expected": 29,
+  "by_outcome": {
+    "refused": 19,
+    "allowed": 6,
+    "killed": 3,
+    "escapes": 1
+  },
+  "ok": true,
+  "code_lines": 145,
+  "events": 45
+}

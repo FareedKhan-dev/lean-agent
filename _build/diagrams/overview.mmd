@@ -1,0 +1,27 @@
+flowchart TB
+    %%STYLES%%
+    subgraph LAB["🧪 LAB · measurement · Parts I, II, VII to IX"]
+        direction LR
+        inst["📏 <b>instruments</b><br/>proven before use"]:::lab --> tasks["🎫 <b>34 tickets</b><br/>a house project<br/>3 specifications"]:::lab
+        tasks --> arms["⚖️ <b>arms and ablations</b><br/>unguided to full system"]:::lab
+        arms --> verdict["🏁 <b>KEPT or REMOVED</b><br/>per piece, by a rule<br/>written in advance"]:::gold
+    end
+    subgraph PLUGIN["🧩 PLUGIN · the system · Parts IV to VI"]
+        direction LR
+        rules["📜 <b>one ruleset</b><br/>lite · full · ultra"]:::plugin --> hooks["🪝 <b>hooks</b><br/>keep the rules in front<br/>of every model call"]:::plugin
+        hooks --> gates["🚦 <b>gates and critic</b><br/>enforce what the rules<br/>only ask for"]:::plugin
+        gates --> products["🛠️ <b>skills</b><br/>review · audit · debt<br/>gain · help"]:::plugin
+    end
+    subgraph HOST["🖥️ HOST · the agent runtime · Part III"]
+        direction LR
+        client["📡 <b>streaming client</b><br/>deadline · retries · ledger"]:::host --> loop(("🔁 <b>agent<br/>loop</b>")):::host
+        bus["📣 <b>event bus</b><br/>six lifecycle moments"]:::host -.-> loop
+        ctx["🧠 <b>context manager</b><br/>one system message"]:::host -.-> loop
+        skills["📚 <b>skills and commands</b><br/>loaded when used"]:::host -.-> loop
+        loop --> tools["🧰 <b>six tools in a fence</b><br/>ls · read · grep<br/>edit · run · done"]:::host
+    end
+    LAB == "pieces that do not earn their place leave" ==> PLUGIN
+    PLUGIN -. "plugs into the event bus" .-> HOST
+    style HOST fill:#f7faff,stroke:#2a78d6,stroke-width:2px
+    style PLUGIN fill:#f5fbf8,stroke:#1baf7a,stroke-width:2px
+    style LAB fill:#fffaf3,stroke:#eb6834,stroke-width:2px

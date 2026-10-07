@@ -1,0 +1,15 @@
+{
+  "id": "ob-sensor-retry",
+  "title": "Retry the flaky sensor link",
+  "category": "over-build",
+  "split": "held-out",
+  "axis": "quality",
+  "rung": 7,
+  "entry": "sensor.py",
+  "protected": ["link.py"],
+  "requirements": [],
+  "python_target": "3.12",
+  "prompt": "The radio link to the field sensor drops out now and then, and `read_value()` in sensor.py then fails with TimeoutError. Make `read_value()` try again when the read times out, up to 3 attempts in total, before giving up. A value that cannot be parsed is a real fault: report it straight away, do not retry it.",
+  "notes": "A five-line loop that catches TimeoutError only. The lazy-wrong version catches Exception and retries bad data; the bloated one builds a retry policy class with backoff and jitter.",
+  "extension": "Log a warning (with the logging module) each time a read is retried."
+}

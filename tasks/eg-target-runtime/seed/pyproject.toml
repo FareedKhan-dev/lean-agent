@@ -1,0 +1,6 @@
+[project]
+name = "depot-notify"
+version = "1.8.2"
+description = "Text-message alerts for the depots. Runs on the depot Raspberry Pis."
+requires-python = ">=3.9"
+dependencies = []

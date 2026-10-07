@@ -1,0 +1,16 @@
+sequenceDiagram
+    participant A as 🤖 agent
+    participant N as 🔔 check nudge
+    participant C as 🔍 critic
+    participant G as 🛡️ trim guard
+    A->>N: done, with code added and no check
+    N-->>A: leave one runnable check (asked once)
+    A->>A: adds a few asserts under if __name__
+    A->>C: done
+    C-->>A: 1. shrink: functools.cache (net: -9 lines)<br/>2. delete: an unused counter (net: -3 lines)<br/>net: -12 lines
+    A->>G: an edit that removes the cache class
+    G-->>A: allowed: no guard was lost
+    A->>G: an edit that also drops an input check
+    G-->>A: refused: the file's guard count would fall
+    A->>A: done, and the episode ends
+    Note over A,G: smaller, with its check, every guard intact

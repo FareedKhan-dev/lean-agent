@@ -1,0 +1,13 @@
+flowchart TB
+    %%STYLES%%
+    subgraph R1[" "]
+        direction LR
+        C["⏱️ <b>S92 time<br/>and tokens</b>"]:::host --> P["💷 <b>S93 cost</b>"]:::gold --> W["👀 <b>S94 watching<br/>it work</b>"]:::host --> F["📁 <b>S94b your<br/>own folder</b>"]:::plugin
+    end
+    subgraph R2[" "]
+        direction LR
+        D["🐶 <b>S95 dogfooding</b>"]:::lab --> A["🧭 <b>S96 adoption</b>"]:::plugin --> R["🔁 <b>S97 reproducing</b>"]:::host --> M["🧾 <b>S98 manifest</b>"]:::grey
+    end
+    R1 --> R2
+    style R1 fill:none,stroke:none
+    style R2 fill:none,stroke:none

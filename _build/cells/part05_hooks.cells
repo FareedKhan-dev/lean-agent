@@ -1,0 +1,664 @@
+#%% md
+# Part V - Plugin II: delivering the rules
+
+A rule the model never sees does nothing, and a rule it saw forty turns ago does less.
+
+**Where this sits.** Part IV wrote the rules; this Part makes sure they arrive, and keep arriving. Writing a ruleset into a system message once is the easy part, and it is what the *rules-only* arm of Part VII does. Real sessions are harder on rules than a single episode is: the user changes the level halfway through or switches the system off, the conversation is compacted and loses whatever was injected into it, a subagent starts with a context of its own, a project already carries a copy of the rules in its own instructions file, and a hook can run without its text ever reaching the model. Each of those is a way for the rules to silently stop applying, and each gets a mechanism here: a session hook, a mode tracker with a one-line header on every prompt, inject-once accounting, re-injection after compaction, subagent injection, coexistence with a static copy, and a delivery probe that asks the model to prove what it received. Part VII then measures whether the mechanisms beat the words alone (H4) and what happens to the rules in a long session without them (H10, H11).
+
+**By the end of this Part you can** deliver instructions through lifecycle hooks rather than by pasting them, design mode commands that cannot be triggered by accident, keep the token cost of rules flat over a long session, survive compaction and subagents, avoid double injection, and verify delivery instead of assuming it.
+
+{{diagram:session_hooks}}
+
+#%% md
+## S37 - The plugin and its session hook
+
+**Theory.** The plugin is one class with an `install` method, like the chaos plugin in S22; everything it does goes through the host's public extension points. Its session hook answers every `session_start` (a new session, a resumed one, a cleared one and a compacted one) with the ruleset at the current level as a system section. Two conditions make it step back. If the user has switched the system off, it injects nothing. And if the project's own instructions file already contains our ruleset (someone pasted it into `AGENTS.md`), it injects nothing either, because the model would otherwise read the same seven hundred tokens twice on every call. The hook keeps a little state on the host (`on`, `level`, what it last injected), and the statusline gets a badge that says the level in words.
+
+**In plain terms.** The plugin hands the model its rules at the start of every session, unless they are switched off or already there.
+
+#%% md
+The plugin needs one way to recognise a copy of the rules that it did not inject itself. The first line of the full ruleset is its title, and no project file would carry it by accident.
+
+#%% code
+MARKER_LINE = ruleset("full").splitlines()[0]          # how a static copy of the rules is recognised
+print(f"[plugin] a pasted copy of the rules is recognised by its first line: {MARKER_LINE!r}")
+
+#%% md
+**`LeanPlugin`** is our delivery layer, the one class that turns the ruleset into hooks on the host. Its constructor only records switches, one for each delivery mechanism: the level to start at, the header on every prompt, re-injection after compaction, subagent injection, the repeat-on-every-prompt variant, and which subagent roles receive rules. The experiments switch these off one at a time to measure what each is worth, which is why every one of them is a constructor argument rather than a constant. The methods follow, one per cell.
+
+#%% code
+class LeanPlugin:
+    """Our system's delivery layer: the ruleset reaches the model through hooks, at the right
+    level, once per session and again after compaction, in subagents too, with a one-line
+    header on every prompt and a command to change level or switch off. Every behaviour can
+    be switched off for the ablations of Part VII."""
+
+    def __init__(self, level=None, header=True, reinject_on_compact=True, subagents=True,
+                 every_prompt=False, matcher=r"^(?!router$)", label=None):
+        self.start_level = level                        # None: start at the level saved in the configuration
+        self.header = header                            # the one-line mode header on every prompt
+        self.reinject = reinject_on_compact             # give the rules back after compaction (S40)
+        self.subagents = subagents                      # hand subagents the compact copy (S41)
+        self.every_prompt = every_prompt                # the whole ruleset with every prompt: the variant S39 measures
+        self.matcher = re.compile(matcher)              # subagent roles that get rules: by default every role but the router
+        self.label = label                              # a name for the configuration; nothing reads it yet
+
+show_def(LeanPlugin, layer="plugin")
+
+#%% code
+as_built = LeanPlugin()                                 # every switch at its default
+# everything on except the every-prompt variant; the level comes from the configuration at install time
+print(f"[plugin] as built: start level {as_built.start_level or 'from the configuration'}, header {as_built.header}, "
+      f"re-inject {as_built.reinject}, subagents {as_built.subagents}, every prompt {as_built.every_prompt}")
+
+#%% md
+**`LeanPlugin.install(host)`** is the only place the plugin reaches into a host, and it does so only through the host's public extension points. It registers the `level` setting, so a default saved with `/lean default` reaches new sessions; it creates the plugin's state on this host; it attaches three hooks; it registers the `/lean` command; and it puts the level badge first on the statusline. The state lives on the host rather than on the plugin object, which is what keeps one session's mode out of another's (S44).
+
+#%% code
+@method_of(LeanPlugin)
+def install(self, host):
+    host.config.register("level", "full", valid=lambda v: v in LEVELS)   # a saved default must name a real level
+    level = self.start_level or host.config.get("level")[0]           # an explicit level beats the saved default
+    host.state["lean"] = {"on": True,                   # on until the user types /lean off
+                          "level": level,               # the level this session runs at
+                          "injected": None,             # the level whose rules sit in the context now, if any
+                          "static": False,              # true when the project file already carries the rules
+                          "announce_off": False}        # true from /lean off until the next prompt carries the notice
+    # priority 20: our hooks run before other plugins' hooks at the default of 50
+    host.bus.on("session_start", self.on_session_start, name="lean.session", priority=20)
+    host.bus.on("user_prompt", self.on_user_prompt, name="lean.prompt", priority=20)   # header, level changes, off
+    if self.subagents:                                  # the S41 switch: without it, subagents start with no rules
+        host.bus.on("subagent_start", self.on_subagent_start, name="lean.subagent", priority=20)   # the compact copy
+    # /lean with its arguments; the third value is the line /help prints for it
+    host.commands.register(CMD, self.on_command, f"/{CMD} [on|off|lite|full|ultra|status|default LEVEL]")
+    host.status_parts.insert(0, self.badge)             # first on the statusline: the mode is what a user looks for
+
+show_def(LeanPlugin.install, layer="plugin")
+
+#%% md
+**`LeanPlugin.on_session_start(host, ctx, source)`** answers every `session_start`, whatever caused it (a new session, a resume, a clear or a compaction), with the ruleset at the current level as the `lean` system section. It steps back in three cases: the user has switched the system off, the project's own instructions file already contains the rules (recognised by `MARKER_LINE`), or the context has just been compacted and re-injection is switched off for an experiment. It also records which level it injected, and that record is how the prompt hook knows, later, that the section has gone stale.
+
+#%% code
+@method_of(LeanPlugin)
+def on_session_start(self, host, ctx, source, **_):
+    st = host.state["lean"]                             # this host's mode, created by install()
+    st["injected"] = None                               # a new context starts without our section
+    project = ctx.sections.get("project")               # (rank, text) from AGENTS.md, or None
+    st["static"] = bool(project) and MARKER_LINE in project[1]   # someone pasted the rules into the project file
+    if not st["on"]:                                    # switched off: inject nothing
+        return None
+    if st["static"]:                                    # already there: a second copy costs tokens and adds nothing
+        return None
+    if source == "compact" and not self.reinject:       # the S40 variant: let compaction lose the rules
+        return None
+    st["injected"] = st["level"]                        # remembered, so a later level change can be spotted
+    return {"section": "lean", "text": ruleset(st["level"]), "rank": 20}   # rank 20: after the project file
+
+show_def(LeanPlugin.on_session_start, layer="plugin")
+
+#%% md
+`install` wires up methods that are only defined further down, so for now the hooks are tried on a bare host that is handed, by hand, the state `install` would create. A clean project gets the section; a project whose `AGENTS.md` already holds the rules gets nothing.
+
+#%% code
+hook_host = Host(label="demo", config_path=RUNTIME / "demo" / "lean.json")   # no plugin; its own config file, kept apart
+# the state install() would create, written out by hand
+hook_host.state["lean"] = {"on": True, "level": "full", "injected": None, "static": False, "announce_off": False}
+hook_plugin = LeanPlugin(level="full")                  # its hooks are called directly in the cells below
+pasted_ctx = Context()                                  # a project that pasted the rules into its AGENTS.md
+pasted_ctx.set_section("project", "Team conventions.\n\n" + ruleset("full"), rank=10)   # where start_session puts it
+print(f"[hook] AGENTS.md already holds the rules: {hook_plugin.on_session_start(hook_host, pasted_ctx, 'startup')}")
+hook_ctx = Context()                                    # a project with no rules file
+hook_answer = hook_plugin.on_session_start(hook_host, hook_ctx, "startup")   # a dict the host would apply
+print(f"[hook] a clean project: section {hook_answer['section']!r} at rank {hook_answer['rank']}, "
+      f"about {tokens_of(hook_answer['text'])} tokens")
+hook_ctx.set_section(hook_answer["section"], hook_answer["text"], hook_answer["rank"])   # what the host does with it
+print(f"[hook] the plugin's state now: {hook_host.state['lean']}")   # injected now says full
+
+#%% md
+**`LeanPlugin.on_user_prompt(host, ctx, prompt)`** runs before every prompt joins the conversation, and does two jobs. It keeps the section in step with the state: a level changed since the last injection is replaced, and a system switched off has its section dropped. And it builds the prefix that goes in front of the prompt: the one-line mode header while the system is on, the whole ruleset as well in the every-prompt variant, and, once, a notice that the rules no longer apply right after `/lean off`. When there is nothing to do it returns `None`, which the host treats as no answer at all.
+
+#%% code
+@method_of(LeanPlugin)
+def on_user_prompt(self, host, ctx, prompt, **_):
+    st = host.state["lean"]                             # this host's mode
+    out = {}                                            # what the host should do; nothing, if it stays empty
+    # on, not already in the project file, and the section holds another level (or none)
+    if st["on"] and not st["static"] and st["injected"] != st["level"]:
+        out.update(section="lean", text=ruleset(st["level"]), rank=20)      # the level changed: replace
+        st["injected"] = st["level"]                                         # and remember the new one
+    if not st["on"] and st["injected"]:                 # off, with our section still in the context
+        out["drop"] = "lean"                                                 # switched off: remove
+        st["injected"] = None                                                # nothing of ours is left
+    prefix = []                                         # lines to put in front of the prompt
+    if self.every_prompt and st["on"]:                  # only in the every-prompt variant
+        prefix.append(ruleset(st["level"]))                                  # the ablation S39 measures
+    if self.header and st["on"]:                        # the header is on by default
+        prefix.append(f"[{SYSTEM_NAME}: {st['level']}]")                     # the reminder, at the point of decision
+    if st["announce_off"]:                              # set by /lean off
+        prefix.append(f"[{SYSTEM_NAME}: off] The proportional-code rules no longer apply.")
+        st["announce_off"] = False                                           # said once, then never again
+    if prefix:                                          # one block of lines, in the order built above
+        out["prefix"] = "\n".join(prefix)
+    return out or None
+
+show_def(LeanPlugin.on_user_prompt, layer="plugin")
+
+#%% code
+hook_host.state["lean"]["level"] = "ultra"              # what /lean ultra does to the state
+hook_answer = hook_plugin.on_user_prompt(hook_host, hook_ctx, "fix the cache")   # the first prompt after the change
+# the answer replaces the section and carries the header
+print(f"[hook] after a level change: keys {sorted(hook_answer)}; the new text is the ultra level: "
+      f"{hook_answer['text'] == ruleset('ultra')}; prefix {hook_answer['prefix']!r}")
+hook_ctx.set_section(hook_answer["section"], hook_answer["text"], hook_answer["rank"])   # applied, as the host would
+# nothing to replace now, so only the header remains
+print(f"[hook] the next prompt, with nothing changed: {hook_plugin.on_user_prompt(hook_host, hook_ctx, 'and add a test')}")
+
+#%% md
+**`LeanPlugin.on_subagent_start(host, ctx, role)`** gives a starting subagent the compact copy of the rules, the core lines only, when the system is on and the subagent's role passes the plugin's matcher. A subagent never inherits the main conversation, so this hook is the only way rules can reach it. The router is left out by default: a helper whose only job is to answer yes or no has no use for them.
+
+#%% code
+@method_of(LeanPlugin)
+def on_subagent_start(self, host, ctx, role, **_):
+    st = host.state["lean"]                             # the main session's mode applies to its helpers
+    if st["on"] and self.matcher.search(role):          # on, and a role the matcher lets through
+        return {"section": "lean", "text": ruleset("full", core_only=True), "rank": 20}   # the compact copy
+    return None
+
+show_def(LeanPlugin.on_subagent_start, layer="plugin")
+
+#%% code
+for role_name in ("explorer", "reviewer", "router"):    # two helpers that read code, and the router
+    sub_answer = hook_plugin.on_subagent_start(hook_host, Context(SUBAGENT_PROMPT), role_name)   # a subagent's own context
+    got = f"the compact copy, about {tokens_of(sub_answer['text'])} tokens" if sub_answer else "nothing"
+    print(f"[hook] subagent role {role_name!r}: {got}")
+
+#%% md
+**`LeanPlugin.on_command(host, args)`** handles `/lean` and whatever follows it. A bare `/lean` or `on` switches on, `off` switches off and arranges the notice, a level name switches on at that level, `status` reports, and `default LEVEL` saves a default for new sessions by merging it into the configuration file. Anything else is reported back with the state left exactly as it was, because a typo must never quietly reset the level.
+
+#%% code
+@method_of(LeanPlugin)
+def on_command(self, host, args):
+    st = host.state["lean"]                             # the state every branch below reads or changes
+    arg = args.strip().lower()                          # "/lean  Ultra " means ultra
+    if arg in ("", "on"):                               # a bare /lean switches on, as /lean on does
+        st["on"] = True                                 # at whatever level was set before
+        return f"{SYSTEM_NAME} on ({st['level']})"
+    if arg == "off":                                    # the level is kept for the next /lean
+        st["on"] = False                                # the hooks stop injecting from here on
+        st["announce_off"] = True                       # the next prompt says so, once
+        return f"{SYSTEM_NAME} off"
+    if arg in LEVELS:                                   # lite, full or ultra
+        st["on"] = True                                 # choosing a level also switches on
+        st["level"] = arg                               # the prompt hook swaps the section at the next prompt
+        return f"{SYSTEM_NAME} on ({arg})"
+    if arg == "status":                                 # report only; nothing changes
+        return f"{SYSTEM_NAME}: {'on' if st['on'] else 'off'}, level {st['level']}"
+    m = re.fullmatch(r"default\s+(\w+)", arg)           # "default lite", and nothing after it
+    if m and m.group(1) in LEVELS:                      # a real level, or nothing is saved
+        host.config.set_default("level", m.group(1))    # merged into the file, so other settings survive
+        return f"default level is now {m.group(1)} for new sessions"
+    # anything else: say so, and leave every part of the state alone
+    return f"unknown option {args!r}; nothing changed ({SYSTEM_NAME} is {'on' if st['on'] else 'off'}, {st['level']})"
+
+show_def(LeanPlugin.on_command, layer="plugin")
+
+#%% code
+for typed in ("status", "lite", "extreme", "off"):      # a report, a level, a typo, and off
+    print(f"  /{CMD} {typed:<8} {hook_plugin.on_command(hook_host, typed)}")
+# the prompt after /lean off: the section is dropped and the notice goes out, once
+print(f"  {'a prompt':<14} {hook_plugin.on_user_prompt(hook_host, hook_ctx, 'fix the cache')}")
+print(f"  /{CMD} {'on':<8} {hook_plugin.on_command(hook_host, 'on')}")   # back on, at the level chosen before
+
+#%% md
+**`LeanPlugin.badge(host)`** is the plugin's part of the statusline: the system's name and either its level or `off`, in words. The words carry the meaning by themselves, so the badge still works without colour, in a log file or in a screen reader (S21).
+
+#%% code
+@method_of(LeanPlugin)
+def badge(self, host):
+    st = host.state["lean"]                             # read fresh on every redraw of the statusline
+    return f"{SYSTEM_NAME}: {st['level'] if st['on'] else 'off'}"   # the level while on, otherwise the word off
+
+show_def(LeanPlugin.badge, layer="plugin")
+
+#%% code
+print(f"[badge] {hook_plugin.badge(hook_host)}")        # on, at lite after the commands above
+# switch off, then read the badge again in the same line
+print(f"  /{CMD} off: {hook_plugin.on_command(hook_host, 'off')}; the badge now reads {hook_plugin.badge(hook_host)!r}")
+
+#%% md
+Every method is attached now, so the plugin can be installed the normal way, in a host that starts a real session.
+
+#%% code
+host = Host(plugins=[LeanPlugin(level="full")], label="demo")   # the constructor calls install()
+host.start_session(materialise(SUITE["ob-postcode-cache"], WS_DIR / "plugin-demo"))   # session_start fires here
+print(f"[plugin] sections after session start: {list(host.ctx.sections)}")
+# every event that has at least one hook, with the hooks' names
+print(f"[plugin] hooks installed: {[(e, [h.name for h in hs]) for e, hs in host.bus.hooks.items() if hs]}")
+print(f"[plugin] statusline: {host.status()}")         # the badge first, then the host's own parts
+# the fingerprint changes only when the system message really changes
+print(f"[plugin] system message: about {tokens_of(host.ctx.system_text())} tokens, fingerprint {host.ctx.fingerprint()}")
+
+#%% md
+## S38 - Modes: commands that cannot fire by accident
+
+**Theory.** The user controls the system with one command, `/lean`, followed by a level, `on`, `off`, `status` or `default LEVEL`. Four details separate a mode system people trust from one they fight. **Only a standalone command counts**: the whole prompt must be the command, so a ticket that says *"add a normal mode toggle to the settings page"* is a ticket, not an instruction to switch anything off. **An invalid argument changes nothing**: `/lean extreme` reports the problem and leaves the level where it was, rather than resetting it to a default the user did not ask for. **Off is announced**: rules already in the conversation can keep steering a model after they are removed, so switching off adds a one-line notice that they no longer apply. **A default persists by merging** into the configuration file, so setting it never wipes other settings. On every prompt while the system is on, the tracker adds a one-line header, `[lean-agent: full]`. It costs a few tokens and keeps the mode visible to the model at the point of decision, which is where a long conversation erodes it.
+
+**In plain terms.** One command changes the mode; nothing else can. Bad input changes nothing, switching off is said out loud, and every prompt carries a short reminder.
+
+**The mode as a state machine.** Only a prompt that is the whole command moves between states. A level name switches the rules on at that level, and switching off is announced to the model once.
+
+{{diagram:modes}}
+
+#%% md
+**`section_level(ctx)`** reads back which level's ruleset a context really holds, by comparing the `lean` section with each level's text, word for word. The plugin's state says what it *intends*; this says what the model would *see*, and the mode test below checks both.
+
+#%% code
+def section_level(ctx):
+    """Which level's ruleset the context holds, or '-'."""
+    text = ctx.sections.get("lean", (0, ""))[1]         # the plugin's section text, or "" when there is none
+    for lv in LEVELS:                                   # lite, full, ultra
+        if text == ruleset(lv):                         # an exact match, never a guess from a few words
+            return lv
+    return "-"
+
+show_def(section_level, layer="plugin")
+
+#%% code
+# the demo context holds the ultra section applied above; a brand new context holds none
+print(f"[modes] the demo context above holds: {section_level(hook_ctx)}; a fresh context holds: {section_level(Context())}")
+
+#%% md
+**`mode_trace(steps, level)`** runs a script of typed lines through a host with the plugin and records, after each line, what the host answered and the plugin's state: on or off, the level, which ruleset the context really holds, and the badge. Two pseudo-steps stand for events a user cannot type, `<compact>` and `<new session>`. It uses the scripted model with a throwaway ledger, so no model is called, and it deletes its configuration file first, so a default saved by an earlier run cannot leak in.
+
+#%% code
+def mode_trace(steps, level="full"):
+    """Run a script of prompts through a host with the plugin and record the state after each."""
+    cfg = RUNTIME / "modes" / "lean.json"               # where /lean default saves, for this trace only
+    shutil.rmtree(cfg.parent, ignore_errors=True)       # start with no saved default at all
+    door = LLM("smoke", Ledger(":memory:"), scripted=SCRIPTED)   # nothing here reaches a real model
+    h = Host(llm=door, plugins=[LeanPlugin(level=level)], label="modes", config_path=cfg)   # the plugin under test
+    h.start_session(materialise(SUITE["ob-postcode-cache"], WS_DIR / "modes"))   # a fresh copy of the postcode seed
+    rows = []                                           # one row per step
+    for step in steps:                                  # typed lines, and the two pseudo-steps
+        if step == "<compact>":                         # as if the conversation had grown past the budget
+            h.compact()                                 # drops every plugin section, then fires session_start
+            said = "(context compacted)"                # what the table shows in the answer column
+        elif step == "<new session>":
+            # a new host whose plugin has no level of its own: it has to pick up the saved default
+            h = Host(llm=door, plugins=[LeanPlugin()], label="modes", config_path=cfg)
+            h.start_session(materialise(SUITE["ob-postcode-cache"], WS_DIR / "modes"))   # a fresh workspace too
+            said = "(a new session reads the saved default)"
+        else:
+            reply = h.handle_prompt(step)               # a command answers; anything else joins the conversation
+            # the command's answer, or the start of what the model would be sent, header included
+            said = reply if reply is not None else f"to the model: {h.ctx.messages[-1]['content'][:40]!r}"
+        st = h.state["lean"]                            # the state after this step
+        # what was typed, what came back, and the state it left behind
+        rows.append({"step": step, "said": said, "on": st["on"], "level": st["level"],
+                     "section": section_level(h.ctx), "status": h.status().split(" | ")[0]})   # the badge comes first
+    return rows
+
+show_def(mode_trace, layer="plugin")
+
+#%% md
+The script is the test: twelve typed lines, and for each one the state it must leave behind.
+
+#%% code
+# twelve typed lines; <compact> and <new session> stand for events a user cannot type
+SCRIPT = ["/lean ultra", "fix the cache", "/lean off", "fix the cache", "add a normal mode toggle to the settings page",
+          "/lean extreme", "<compact>", "/lean", "fix the cache", "/lean default lite", "<new session>", "/lean status"]
+EXPECT = [("ultra", True, "full"),      # /lean ultra: the level changes at once, the context still holds full
+          ("ultra", True, "ultra"),     # the next prompt: the hook swaps in the ultra rules
+          ("ultra", False, "ultra"),    # /lean off: off at once, the section goes with the next prompt
+          ("ultra", False, "-"),        # that prompt: the section is dropped and the notice sent
+          ("ultra", False, "-"),        # a ticket that mentions a mode is still a ticket
+          ("ultra", False, "-"),        # /lean extreme: not a level, so nothing changes
+          ("ultra", False, "-"),        # compaction while off brings nothing back
+          ("ultra", True, "-"),         # a bare /lean switches on; the rules return with the next prompt
+          ("ultra", True, "ultra"),     # and here they are
+          ("ultra", True, "ultra"),     # /lean default lite saves a default; this session stays at ultra
+          ("lite", True, "lite"),       # a new session starts at the saved default
+          ("lite", True, "lite")]       # /lean status only reports
+print(f"[modes] {len(SCRIPT)} steps, each with its expected (level, on, rules in the context)")
+
+#%% code
+rows = mode_trace(SCRIPT)                               # one row per step, as the host saw it
+for r, (lv, on, sec) in zip(rows, EXPECT):              # each step beside what it should have left behind
+    # a step passes only if all three parts of the state are what the script expects
+    r["verdict"] = "PASSED" if (r["level"], r["on"], r["section"]) == (lv, on, sec) else "FAILED"
+table(rows, [("step", "user types", ""), ("said", "host answers", ""), ("on", "on", ""), ("level", "level", ""),
+             ("section", "rules in the context", ""), ("status", "badge", ""), ("verdict", "verdict", "")])
+results = []                                            # expect() records each check here
+# one line for the whole script: every step has to pass
+expect(f"{sum(r['verdict'] == 'PASSED' for r in rows)}/{len(rows)} steps left the state exactly as expected",
+       all(r["verdict"] == "PASSED" for r in rows))
+
+#%% md
+**Try the modes yourself.** The box below runs whatever you type through a fresh host with the plugin installed. Commands answer at once; anything else is shown as it would reach the model, header included. No model is called, so it works in every mode, a replay included.
+
+#%% code
+# W5: any sequence of commands and requests, one at a time
+play = Host(llm=LLM("smoke", Ledger(":memory:"), scripted=SCRIPTED), plugins=[LeanPlugin()], label="modes",
+            config_path=RUNTIME / "modes-play" / "lean.json")   # a scripted model and its own config: nothing typed here costs anything
+play.start_session(materialise(SUITE["ob-postcode-cache"], WS_DIR / "modes-play"))   # its own copy of the seed
+print(f"[modes] a fresh host for the box below: {play.status()}")
+
+#%% md
+**`play_step(text)`** sends one typed line to that host and reports what came back and the mode afterwards: a command's answer, or the start of the message as the model would receive it, header included. It is the engine of the box below, and it can be called directly in a session without widgets.
+
+#%% code
+def play_step(text):
+    """One line typed at the host: what it answered, and the mode afterwards."""
+    reply = play.handle_prompt(text)                    # None unless the line was a command
+    st = play.state["lean"]                             # the mode after this line
+    # a command's answer, or the first 60 characters the model would receive
+    said = reply if reply is not None else "to the model: " + repr(play.ctx.messages[-1]["content"][:60])
+    return f"{said}\n  on {st['on']}, level {st['level']}, rules in the context: {section_level(play.ctx)}"
+
+show_def(play_step, layer="lab")
+
+#%% code
+print(f"[modes] for example, '/{CMD} lite' then a request:")
+for line in (f"/{CMD} lite", "add a retry to the uploader"):   # a command, then an ordinary request
+    print(f"  > {line}\n  {play_step(line)}")
+
+#%% code
+W = widgets()                                           # None in a headless run: play_step() still works by hand
+if W:
+    from IPython.display import display                 # only needed when there is a widget to show
+    # Enter sends the line, because continuous_update is off
+    box = W.Text(placeholder=f"/{CMD} ultra, /{CMD} off, or any request", continuous_update=False, layout={"width": "60%"})
+    # a scrolling log of everything typed and answered
+    out = W.Output(layout={"border": "1px solid #e6e5e1", "max_height": "260px", "overflow": "auto"})
+
+    def _play(change):
+        text = change["new"].strip()                    # the line just sent
+        if not text:                                    # clearing the box fires this too; ignore it
+            return
+        with out:                                       # print into the log, not under the cell
+            print(f"> {text}\n  {play_step(text)}")
+        box.value = ""                                  # ready for the next line
+
+    box.observe(_play, names="value")                   # runs whenever a line is sent
+    display(W.VBox([box, out]))                         # the box above its log
+else:
+    print("(no widget in this run, which needs a live Jupyter session; call play_step('...') directly)")
+
+#%% md
+Read the table from the top. `/lean ultra` changes the level at once, but the context still holds the full ruleset until the next prompt, when the hook replaces it (row 2). `/lean off` takes effect the same way, and the next prompt carries the notice. The ticket about a "normal mode toggle" leaves the mode alone, and so does `/lean extreme`. Compaction while off brings nothing back. A bare `/lean` switches on again, and a default saved with `/lean default lite` is what the next session starts with.
+
+#%% md
+## S39 - Inject once, remind every time
+
+**Theory.** There are two ways to keep rules in front of a model over a long session. One is to repeat the whole ruleset with every prompt, which many hook-based setups do because it is the simplest thing that works. The other is to inject it once, as a stable system section, and remind the model of it with a one-line header on each prompt. The first costs the full ruleset again on every turn, and that cost compounds, because every earlier copy stays in the conversation and is re-sent on every later call. The second costs the ruleset once and a few tokens per prompt, and the stable system section is also the part of the request a provider can cache. The measurement below runs the same five-prompt conversation both ways, with the scripted stand-in so the numbers are exact.
+
+**In plain terms.** Say the rules once and point at them afterwards; repeating them every time gets expensive fast.
+
+#%% md
+**`session_tokens(plugin, prompts)`** measures what a plugin costs over a conversation: it sends a list of prompts through a scripted host and records, after each one, how many tokens the whole request to the model would hold. The scripted model makes the numbers exact and free, and a short stand-in reply after each prompt keeps the conversation growing the way a real one does.
+
+#%% code
+def session_tokens(plugin, prompts):
+    """Prompt tokens the model is sent over a scripted multi-prompt session."""
+    door = LLM("smoke", Ledger(":memory:"), scripted=SCRIPTED)   # no real model: the counts are exact and free
+    h = Host(llm=door, plugins=[plugin], label="tokens")    # the plugin under measurement, alone
+    h.start_session(materialise(SUITE["ob-postcode-cache"], WS_DIR / "tokens"))   # a fresh copy of the postcode seed
+    per_call = []                                       # the request's size after each prompt
+    for p in prompts:                                   # the conversation, one prompt at a time
+        h.handle_prompt(p)                              # the hooks run, and the prompt joins the conversation
+        per_call.append(sum(len(m["content"]) for m in h.ctx.render()) // 4)   # tokens_of's rule, over every message
+        h.ctx.add("assistant", "<done>ok</done>")       # a short stand-in reply, so the history grows
+    return per_call
+
+show_def(session_tokens, layer="plugin")
+
+#%% code
+# five follow-up requests in one session, the shape of a real working conversation
+PROMPTS = ["Add a cache to lookup_district.", "Now make unknown postcodes return None.", "Add a check for that.",
+           "Rename normalise to clean.", "Update the visible test."]
+once = session_tokens(LeanPlugin(level="full"), PROMPTS)                     # the rules once, then a header per prompt
+every = session_tokens(LeanPlugin(level="full", every_prompt=True), PROMPTS)  # the whole ruleset with every prompt
+print(f"[tokens] per call, injecting once: {once}")
+print(f"[tokens] per call, repeating the rules: {every}")
+
+#%% code
+# one row per call; the ratio is what repeating costs at that point in the session
+table([{"prompt": i + 1, "inject once": a, "every prompt": b, "ratio": b / a}
+       for i, (a, b) in enumerate(zip(once, every))],
+      [("prompt", "call", "d"), ("inject once", "tokens, inject once", "d"), ("every prompt", "tokens, every prompt", "d"),
+       ("ratio", "ratio", ".1f")])
+# the totals over the five calls, and their ratio
+print(f"\n  five prompts: {sum(once)} tokens injecting once, {sum(every)} repeating the rules "
+      f"({sum(every) / sum(once):.1f}x); the gap grows with every further prompt")
+save_exp("inject_once", {"once": sum(once), "every": sum(every), "ratio": sum(every) / sum(once)})   # for Part VII
+
+#%% md
+## S40 - Compaction drops the rules; the hook puts them back
+
+**Theory.** S17 built compaction to behave the way it does in real agents: the conversation is summarised and every injected section is dropped, as if a new session had started with a summary in hand. That is precisely how rules disappear from long sessions, and nothing visibly breaks when they do: the agent simply starts writing the way it wrote before the rules arrived. The defence is one line of the session hook, which answers `session_start` with source `compact` by injecting the rules again. The demonstration below forces compaction early, by lowering the context budget, and prints for every turn whether the rules were in the system message the model saw. The plugin is run twice, with re-injection on and off.
+
+**In plain terms.** Summarising a long conversation throws the rules away; the plugin notices and hands them back.
+
+#%% md
+**`rules_by_turn(plugin, task_id, budget)`** runs one scripted episode with a context budget small enough to force compaction within a few turns, and records, before every model call, whether the `lean` section is in the context the model is about to see. It shrinks the notebook's global `CONTEXT_BUDGET` for the run and puts it back in a `finally` block, so an error inside the episode cannot leave every later episode compacting early.
+
+#%% code
+def rules_by_turn(plugin, task_id="sf-intake-server", budget=1500):
+    """Run a scripted episode with a tiny context budget; for every turn, was the ruleset in
+    the system message?"""
+    global CONTEXT_BUDGET                               # the host's loop reads this global on every turn
+    saved = CONTEXT_BUDGET                              # the real budget, put back however the run ends
+    CONTEXT_BUDGET = budget                             # small enough that compaction comes within a few turns
+    try:
+        door = LLM("smoke", Ledger(":memory:"), scripted=SCRIPTED)   # the scripted coder: free and repeatable
+        h = Host(llm=door, plugins=[plugin], label="compact")   # the plugin under test, alone
+        seen = []                                       # one entry per model call: were the rules there?
+
+        def note_rules(ctx, **_):                       # pre_llm_call fires just before every call
+            seen.append("lean" in ctx.sections)         # True while our section is in the context
+
+        h.bus.on("pre_llm_call", note_rules, name="probe")   # a probe, not a plugin: it only looks
+        ep = run_episode(SUITE[task_id], h)             # a whole ticket, start to finish
+        return seen, h.ctx.compactions, ep
+    finally:
+        CONTEXT_BUDGET = saved                          # every later episode gets the real budget back
+
+show_def(rules_by_turn, layer="plugin")
+
+#%% code
+with_hook, n1, _ = rules_by_turn(LeanPlugin(level="full"))                             # the plugin as built
+without, n2, _ = rules_by_turn(LeanPlugin(level="full", reinject_on_compact=False))   # the same, without re-injection
+print(f"[compact] compactions: {n1} with re-injection, {n2} without")
+print("  rules in the system message, turn by turn (R = present, . = missing):")
+print(f"    with the hook    {''.join('R' if x else '.' for x in with_hook)}")   # one character per model call
+print(f"    without it       {''.join('R' if x else '.' for x in without)}")
+
+#%% code
+results = []                                            # expect() records each check here
+expect("with re-injection the rules are present on every turn", all(with_hook))   # not one missing turn
+# gone somewhere, and still gone at the last turn: nothing else brings them back
+expect("without it they vanish at the first compaction and stay gone", not all(without) and not without[-1])
+save_exp("compact_reinject", {"with": sum(with_hook), "without": sum(without), "turns": len(with_hook)})   # for Part VII
+
+#%% md
+## S41 - Subagents start from nothing
+
+**Theory.** A subagent gets a fresh context on purpose: it should not inherit the main agent's long conversation. The side effect is that it does not inherit the rules either. A helper that explores the code base, reviews a diff or proposes a fix then works by the model's defaults, and its suggestions flow back into the main agent's work. The plugin answers `subagent_start` with the **compact copy** of the ruleset (the core lines: read first, never cut, prove it, how to answer), which is enough for a helper that only reads, at a fraction of the cost. A **matcher** decides which roles receive it; the router, whose only job is to answer yes or no, is excluded. Part VII measures whether injected subagents behave differently (H11).
+
+**In plain terms.** Helper agents start with a blank slate, so the plugin hands them a short version of the rules.
+
+#%% code
+# the same question to an explorer subagent, from a host without subagent injection and from one with it
+for label, plugin in (("plugin without subagent injection", LeanPlugin(subagents=False)),
+                      ("plugin with it", LeanPlugin())):
+    h = Host(plugins=[plugin], label="sub")             # the notebook's front door: the call is kept in the ledger
+    ws = materialise(SUITE["ob-postcode-cache"], WS_DIR / "sub-demo")   # a fresh copy of the postcode seed
+    h.start_session(ws)
+    result, sub = h.subagent("explorer", "Which function looks up a district?", ws)   # the fast model, read-only tools
+    # the sections the subagent's own context received, and what its system message costs
+    print(f"[{label}] explorer sections: {list(sub.sections)}, system message about {tokens_of(sub.system_text())} tokens")
+
+#%% code
+h = Host(plugins=[LeanPlugin()], label="sub")           # the plugin as built, matcher included
+h.start_session(ws)                                     # the workspace from the cell above
+# one turn is enough: what matters is which sections the router's context gets, not its answer
+_, router_ctx = h.subagent("router", "Is 'fix the cache' a coding request?", ws, max_turns=1)
+print(f"[router] sections: {list(router_ctx.sections)} (excluded by the matcher, as intended)")
+# what an included subagent pays for its rules, against the full level
+print(f"  the compact copy: {tokens_of(ruleset('full', core_only=True))} tokens instead of {tokens_of(ruleset('full'))}")
+
+#%% md
+## S42 - Two copies are not better than one
+
+**Theory.** Some teams will paste the ruleset into their project's `AGENTS.md`, the static instructions file the host reads at every session start. If the plugin also injects it, the model reads seven hundred tokens twice on every call and gains nothing. The session hook therefore looks at the project section first and steps back when it finds the ruleset's first line there. A related guard sits in the context manager: every section has a size cap, so a project instructions file of thirty thousand characters cannot crowd everything else out of the window.
+
+**In plain terms.** If the project already carries the rules, the plugin does not add a second copy.
+
+#%% code
+ws = materialise(SUITE["ob-postcode-cache"], WS_DIR / "coexist")   # a fresh copy of the postcode seed
+# a team that pasted our rules under its own conventions
+(ws / "AGENTS.md").write_text("Team conventions: British spelling in comments.\n\n" + ruleset("full"), encoding="utf-8")
+rows = []                                               # one row per setup
+# the same project, opened by a plugin that never looks and by ours
+for label, plugin in (("plugin, no AGENTS.md check", None), ("plugin as built", LeanPlugin())):
+    # no plugin given: a StaticRules that pastes the rules without looking, which is what the check prevents
+    h = Host(plugins=[plugin] if plugin else [StaticRules(ruleset("full"))], label="coexist")
+    h.start_session(ws)                                 # reads AGENTS.md into the project section
+    text = h.ctx.system_text()                          # everything the model would read before the conversation
+    # how many times the rules' title appears, what the system message costs, and which sections it holds
+    rows.append({"setup": label, "copies of the rules": text.count(MARKER_LINE), "tokens": tokens_of(text),
+                 "sections": ", ".join(h.ctx.sections)})
+# without the check the rules appear twice; with it, once
+table(rows, [("setup", "setup", ""), ("copies of the rules", "copies of the rules", "d"), ("tokens", "system tokens", "d"),
+             ("sections", "sections", "")])
+
+#%% md
+The size cap from S17, on a project file far over the limit:
+
+#%% code
+big = Context()                                         # a context on its own, no host needed
+big.set_section("project", "x" * 40_000, rank=10)       # a project file far beyond SECTION_CAP
+# what was kept, and the count of truncations the context keeps for the health report
+print(f"\n  a 40,000-character project file is capped at {len(big.sections['project'][1]):,} characters "
+      f"(truncations recorded: {big.truncated})")
+
+#%% md
+## S43 - Delivery: did the model actually receive the rules?
+
+**Theory.** A hook that ran is not the same as a rule that arrived. Between the two sit the context manager, the provider's handling of the system message, the model's chat template and anything that truncates long inputs; any of them can lose the text without an error. The only proof of delivery is to ask the model, so each of the six models is asked to quote two things it should have been given: the ruleset's title and the mode header on the prompt. A model that cannot quote them did not receive them, whatever the hook log says.
+
+**In plain terms.** We do not trust that the rules got through; we ask each model to repeat them back.
+
+#%% code
+# the question every model is asked; it names both things it should have been given
+DELIVERY_PROMPT = ("Before anything else: quote, exactly, the first heading of the rules in your system message, "
+                   "and the bracketed mode header at the start of this message. Reply with just those two lines.")
+print(f"[delivery] every model is asked:\n  {DELIVERY_PROMPT}")
+
+#%% md
+**`_scripted_delivery(model, messages, params)`** is the scripted model's answer to the delivery question in smoke runs: it quotes the two lines that a model which received both the rules and the header would quote. It recognises its request by the question itself and returns `None` for anything else, so it cannot answer another section's requests by accident.
+
+#%% code
+@SCRIPTED.register
+def _scripted_delivery(model, messages, params):
+    if DELIVERY_PROMPT not in messages[-1]["content"]:  # not the delivery question: leave it to another responder
+        return None
+    # the rules' first line and the mode header, as a model that received both would quote them
+    return f"{MARKER_LINE}\n[{SYSTEM_NAME}: full]"
+
+show_def(_scripted_delivery, layer="lab")
+
+#%% md
+**`delivered(model)`** asks one model to prove what it received. It builds a host with the plugin at the full level, starts a session, sends the delivery question through the normal prompt path, so the mode header is attached exactly as it would be for a ticket, and makes one call with the resulting context. A model passes on each item only if its reply contains the text it was given: the ruleset's title and the bracketed header.
+
+#%% code
+def delivered(model):
+    h = Host(model=model, plugins=[LeanPlugin(level="full")], label="delivery")   # the model under test, our plugin
+    # a workspace per model, so the probes can run at the same time without sharing files
+    h.start_session(materialise(SUITE["ob-postcode-cache"], WS_DIR / f"delivery-{model.split('/')[-1]}"))
+    h.handle_prompt(DELIVERY_PROMPT)                    # the prompt hook puts the mode header in front of it
+    r = h.llm.chat(model, h.ctx.render(), tag="delivery", max_tokens=1500)   # exactly what an agent would send
+    first_line = r.text.strip().splitlines()[0] if r.text.strip() else ""     # an empty reply has no first line
+    return {"model": model.split("/")[-1],                # the name without its organisation prefix
+            "title": MARKER_LINE.lstrip("# ") in r.text,          # "Proportional code", the ruleset's title
+            "header": f"[{SYSTEM_NAME}: full]" in r.text,         # the header exactly as it was sent
+            "reply": plain(first_line)[:60]}                      # enough of the reply to see what it quoted
+
+show_def(delivered, layer="plugin")
+
+#%% code
+with ThreadPoolExecutor(WORKERS) as pool:               # one probe per distinct model, all at once
+    DELIVERY = list(pool.map(delivered, sorted(set(MODEL_FOR.values()))))   # sorted, so the table order is fixed
+# yes or NO in capitals, so a failed delivery stands out in the table
+table([{**d, "title": "yes" if d["title"] else "NO", "header": "yes" if d["header"] else "NO"} for d in DELIVERY],
+      [("model", "model", ""), ("title", "quoted the rules' title", ""), ("header", "quoted the header", ""), ("reply", "first line of the reply", "")])
+# how many models quoted each item, for the prose and Part VII
+save_exp("delivery", {"models": len(DELIVERY), "title": sum(d["title"] for d in DELIVERY), "header": sum(d["header"] for d in DELIVERY)})
+
+#%% md
+## S44 - Scope, persistence and chaos
+
+**Theory.** Three last properties keep the plugin well behaved in real use. **Scope:** the mode lives on the host instance, one per session, so two sessions (or two users) never see each other's level; only the *default* is shared, through the configuration file, and only when someone sets it on purpose. **Persistence:** a session that is resumed gets the rules at its current level again, through the same `session_start` hook with source `resume`. **Chaos:** a corrupt configuration file, a plugin hook that raises, or a hook that hangs must never stop the user's work; the configuration falls back to defaults with a warning (S19), and the event bus records and skips failing hooks (S16). The test below breaks each of these on purpose.
+
+**In plain terms.** Each session has its own mode, a resumed session gets its rules back, and broken files or broken hooks cannot stop the work.
+
+#%% code
+results = []                                            # expect() records each check here
+# scope: two sessions, one level change
+a = Host(plugins=[LeanPlugin(level="full")], label="a")
+b = Host(plugins=[LeanPlugin(level="full")], label="b")   # a second, separate session
+a.start_session(materialise(SUITE["ob-postcode-cache"], WS_DIR / "scope-a"))   # each with its own workspace
+b.start_session(materialise(SUITE["ob-postcode-cache"], WS_DIR / "scope-b"))   # nothing shared with a
+a.handle_prompt("/lean ultra")                          # a command, so no model is involved
+# a changed, b untouched
+expect("switching one session's level leaves another session alone",
+       a.state["lean"]["level"] == "ultra" and b.state["lean"]["level"] == "full")
+# persistence: resuming fires session_start with source "resume", and the hook answers at the current level
+a.start_session(a.ws, "resume")
+# "what can be deleted" is the line only ultra has
+expect("a resumed session gets its rules back at its current level", "what can be deleted" in a.ctx.system_text())
+
+#%% code
+# chaos, part one: a configuration file cut off half way, as a crash during a save would leave it
+broken = RUNTIME / "chaos" / "lean.json"
+broken.parent.mkdir(parents=True, exist_ok=True)        # the folder may not exist yet
+broken.write_text('{"level": ', encoding="utf-8")       # not valid JSON
+c = Host(plugins=[], label="chaos")                     # a host with no plugin
+c.config = Config(broken)                               # reading the broken file
+c.config.register("level", "full", valid=lambda v: v in LEVELS)   # what install() registers
+# the default comes back, and the problem is written down rather than raised
+expect("a corrupt configuration file falls back to the default, with a warning",
+       c.config.get("level") == ("full", "default") and c.config.warnings)
+
+#%% md
+**`BrokenPlugin`** is a plugin written to fail: its session hook divides by zero and its prompt hook sleeps for ten seconds. Installed beside ours, it shows that the event bus contains the damage: the crash is recorded and skipped, the hang is abandoned at the bus's time limit, and our hooks still deliver the rules.
+
+#%% code
+class BrokenPlugin:
+    """A plugin that fails on purpose: one hook raises, the other hangs."""
+
+    def install(self, host):
+        host.bus.on("session_start", lambda **_: 1 / 0, name="broken.session")         # raises ZeroDivisionError
+        host.bus.on("user_prompt", lambda **_: time.sleep(10), name="broken.prompt")    # hangs well past the limit
+
+show_def(BrokenPlugin, layer="lab")
+
+#%% code
+EventBus.HANG_S = 0.3                                   # shortened, so the hang costs a third of a second here
+d = Host(plugins=[BrokenPlugin(), LeanPlugin(level="full")], label="chaos")   # the broken plugin beside ours
+d.start_session(materialise(SUITE["ob-postcode-cache"], WS_DIR / "chaos"))    # the session hook crashes here
+d.handle_prompt("fix the cache")                        # and the prompt hook hangs here
+EventBus.HANG_S = 5.0                                   # back to the real limit
+# our section is in place, and the prompt reached the conversation with our header in front
+expect("a crashing and a hanging plugin did not stop ours from delivering the rules",
+       "lean" in d.ctx.sections and d.ctx.messages[-1]["content"].startswith(f"[{SYSTEM_NAME}: full]"))
+print(f"  health report: {d.bus.report()}")             # the crash and the hang, counted
+print(f"  statusline: {d.status()}")                    # the failures show on the statusline too
+
+#%% md
+**Part V recap.** The rules now reach the model through hooks rather than by being pasted in: at every session start at the level the user chose, with a one-line reminder on every prompt, once rather than repeatedly, again after compaction, in a compact form for subagents, never twice when the project already carries them, and with each model able to quote them back. Mode commands cannot fire by accident, bad arguments change nothing, switching off is announced, and broken plugins or files cannot stop the work. Whether all this delivery machinery beats the same words pasted into a system message is a question for Part VII (H4); Part VI first adds the parts of the system that do not rely on words at all.
+
+**Try it yourself.**
+1. Add `"/LEAN Full"` and `"please /lean off"` to the mode script in S38 and predict both rows before running. Which one is a command?
+2. In S40, set `budget=4000` and find the smallest budget at which compaction still happens.
+3. Change the subagent matcher so that no subagent receives the rules, and check which line of S41's output changes.

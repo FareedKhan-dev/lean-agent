@@ -1,0 +1,26 @@
+sequenceDiagram
+    autonumber
+    participant U as 👤 user
+    participant H as 🖥️ host
+    participant P as 🧩 plugin hooks
+    participant M as 🤖 model
+    participant T as 🧰 tools
+    U->>H: a ticket
+    H->>P: user_prompt
+    P-->>H: level header<br/>(rules, if the level changed)
+    loop one action per turn
+        H->>P: pre_llm_call
+        H->>M: one system message<br/>and the conversation
+        M-->>H: notes and exactly one action
+        H->>P: pre_tool: a gate may refuse
+        alt refused
+            P-->>H: the refusal and its reason
+        else allowed
+            H->>T: run it inside the fence
+            T-->>H: the result
+            H->>P: post_tool: may add a note
+        end
+        H->>M: the result, as the next message
+    end
+    M-->>H: done
+    H-->>U: the change and<br/>a short answer

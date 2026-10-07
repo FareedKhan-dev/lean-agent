@@ -1,0 +1,293 @@
+#%% md
+# Part IX - Case studies: what the averages hide
+
+An average says how often; an episode says how.
+
+**Where this sits.** Parts VII and VIII reduced hundreds of episodes to medians, rates and intervals, and checked those numbers every way we could. This Part goes back to the episodes themselves. It reads three tickets side by side, chosen by a rule fixed before looking, so that the cases illustrate the average instead of flattering it. It sorts every failure by its cause, because "the full system failed 4 tasks" means something different if the four were turn limits than if they were unsafe code. And it collects the debt the system leaves behind: the shortcuts it marked and the work it deferred, with the conditions for coming back.
+
+**By the end of this Part you can** select case studies without cherry-picking, read an agent's change the way a reviewer would, classify why a run failed, and audit the deferrals a system leaves in its wake.
+
+{{diagram:part9_map}}
+
+#%% md
+## S89 - Three tickets, read side by side
+
+**Theory.** Case studies are where write-ups cheat most easily, by showing the most flattering episode as if it were typical. The rule here was fixed before any episode was read: among the tasks that both the unguided agent and the full system passed in their first run, take the three with the largest difference in code added. Both passed, so the difference is not a broken answer against a working one. The largest differences are not typical, and the selection says so; they are where the mechanism is easiest to see. For each, the ticket, both changes, what the full system's gates and critic said on the way, and both final answers.
+
+**In plain terms.** Three tickets where the two agents differed most, both answers correct, shown in full.
+
+#%% md
+**`show_change(seed, final, title)`** draws a change as a reviewer would want to read it: added lines in green, removed lines in red, everything else in grey. It is the same diff `change_diff` gives the critic, rendered as HTML, and it carries the plain diff alongside as the text version, so a headless run or a text-only viewer still shows every line.
+
+#%% code
+from IPython.display import display
+
+def show_change(seed, final, title):
+    """A change as coloured lines in the notebook, with the plain diff as the text version."""
+    text = change_diff(seed, final, limit=6000)             # the critic's diff, with a larger cap for reading
+    rows = []
+    for line in text.splitlines():
+        if line.startswith("+") and not line.startswith("+++"):
+            colour = C3                                     # an added line ("+++" is the file header)
+        elif line.startswith("-") and not line.startswith("---"):
+            colour = C8                                     # a removed line
+        else:
+            colour = INK2                                   # context, headers and hunk markers
+        rows.append(f'<span style="color:{colour}">{html.escape(line)}</span>')    # escaped, so code shows as code
+    body = (f'<div style="font-size:12px;color:{INK2};margin:6px 0 2px">{html.escape(title)}</div>'   # the title line
+            f'<pre style="font-size:11px;line-height:1.35;margin:0">' + "\n".join(rows) + "</pre>")    # the diff itself
+    # raw=True hands both versions to the front end, which shows the richest one it can
+    display({"text/html": body, "text/plain": f"{title}\n{text}"}, raw=True)
+
+show_def(show_change, layer="lab")
+
+#%% code
+# a one-line change to a throwaway file, to see the colours before the real cases
+show_change({"demo.py": "LIMIT = 10\nprint(LIMIT)\n"}, {"demo.py": "LIMIT = 20\nprint(LIMIT)\n"}, "demo.py: a one-line change")
+
+#%% md
+**Choosing the cases by a rule fixed in advance.** Among the tasks both arms passed in their first run, the three with the largest difference in code added. Both answers passed, so a difference here is never a broken answer set against a working one.
+
+#%% code
+FIRST = {(r.arm, r.task): r for r in MAIN if r.replica == 0 and r.score and r.episode}   # each arm's first run of each task
+candidates = []                                  # (how much more the unguided agent wrote, task), one per eligible task
+for t in SUITE:
+    if ("off", t) not in FIRST or ("full", t) not in FIRST:
+        continue                                 # one of the two first runs failed before it could be scored
+    off_run, full_run = FIRST[("off", t)], FIRST[("full", t)]
+    if not (off_run.score.passed and full_run.score.passed):
+        continue                                 # both must pass, so size is the only difference left
+    candidates.append((off_run.score.added_code - full_run.score.added_code, t))
+candidates.sort(reverse=True)                    # the largest gap first; a tie goes to the task id that sorts last
+CASES = [t for _, t in candidates[:3]]
+print(f"[cases] {len(candidates)} tasks passed by both arms in their first run; the three largest differences in code:")
+for gap, t in candidates[:3]:
+    print(f"  {t:<22} the unguided agent added {FIRST[('off', t)].score.added_code}, the full system "
+          f"{FIRST[('full', t)].score.added_code} ({gap:+d})")
+save_exp("cases", {"cases": CASES, "candidates": len(candidates),
+                   # LESS when the full system wrote less in all three cases, MIXED otherwise
+                   "direction": "LESS" if all(gap > 0 for gap, _ in candidates[:3]) else "MIXED",
+                   "gaps": {t: {"off": FIRST[("off", t)].score.added_code, "full": FIRST[("full", t)].score.added_code}
+                            for t in CASES}})
+
+#%% md
+**`read_case(task_id)`** prints one case in full, in the order a reviewer would read it: the ticket, both runs' numbers, what the full system's gates and critic said to it on the way, both changes, and both final answers. Everything comes from the first run of each arm, the same runs the selection rule looked at, so nothing here was picked after the fact.
+
+#%% code
+def read_case(task_id):
+    """One case: the ticket, both runs' numbers, the full system's refusals, both changes, both answers."""
+    t = SUITE[task_id]                                      # the task: its ticket and its seed
+    off = FIRST[("off", task_id)]                           # the unguided agent's first run
+    full = FIRST[("full", task_id)]                         # the full system's first run
+    print(f"[case] {t.id}: {t.title}")
+    for line in textwrap.wrap(t.prompt, 100):               # the ticket, wrapped for reading
+        print("    " + line)
+    for r in (off, full):
+        print(f"  {r.arm:<4} {r.score.added_code:>3} code lines, {r.score.files_new} new files, {len(r.episode.turns):>2} turns, "
+              f"shapes: {shape_names(r.score)}")
+    # every turn the gates or the critic turned away, with the prefix the host adds removed
+    denied = [x.observation.removeprefix("refused: ") for x in full.episode.turns if x.denied]
+    print("  on the way, the full system was held back by:" + ("" if denied else " nothing"))
+    for d in denied:
+        for line in d.splitlines()[:5]:                     # the first five lines of each refusal are enough
+            print("    " + textwrap.shorten(plain(line), 110))
+    for r in (off, full):
+        show_change(t.seed, snapshot(r.episode.ws), f"{r.arm}: the change")
+    for r in (off, full):
+        print(f"  {r.arm} answered: " + textwrap.shorten(plain(r.episode.done_text), 400))
+
+show_def(read_case, layer="lab")
+
+#%% md
+**The first case**, the largest difference among the tasks both arms passed.
+
+#%% code
+if CASES:
+    read_case(CASES[0])
+else:
+    print("[cases] no task was passed by both arms in its first run")
+
+#%% code
+if len(CASES) > 1:
+    read_case(CASES[1])
+else:
+    print("[cases] fewer than two cases")
+
+#%% code
+if len(CASES) > 2:
+    read_case(CASES[2])
+else:
+    print("[cases] fewer than three cases")
+
+#%% md
+**Reading the three cases.** Read each pair of changes for three things. First, **what the extra code was**: a class where a function would do, an option nobody asked for, a hand-written version of something the standard library ships, or comments and docstrings explaining the obvious. Second, **whether anything protective was dropped**: both answers passed the hidden tests, guards included, so a difference in size here is not a difference in safety, which is the property the never-cut list exists to protect. Third, **what the full system said in its final answer**: the output contract asks for the step of the ladder it stopped at and a `left out:` line, with a condition, for each thing it chose not to build. The cases were picked by the size of the difference, so they show the mechanism at its clearest; {{pick:cases.direction|LESS=in all three the full system wrote less, and the medians of Part VII say how often it works this well|MIXED=in at least one of them the full system wrote more, which is worth reading as carefully as the others}}.
+
+**What these three cases show.** In `ob-member-unique` the ticket asks that two members can never share an email, in any case. The unguided agent wrote thirty lines: its own exception class, an email-normalising helper, a hand-written duplicate check in the bulk import, a unique index on `lower(email)`, and a `DELETE` that removes every later member whose email differs only in case, run each time the database is opened. That last statement destroys data silently, and nothing in the ticket asked for it; the hidden test does not cover it, which is why both answers pass. The full system changed two lines: a `UNIQUE COLLATE NOCASE` constraint on the column, and lowercasing in the bulk import. That is the platform step of the ladder, where the database enforces the rule for every caller, including the ones nobody has written yet.
+
+In `sf-meter-import` both answers had to survive dirty field exports, which is the trap. The unguided agent built a small parser: a regular expression for trailing units, another for thousands separators, header detection and a helper to tie them together, most of it for input nobody described. The full system read the file with `csv.DictReader`, skipped anything that does not convert to a finite number, and left a check that feeds it a dirty file. The guards that matter (blank, non-numeric, NaN and short rows) are all present: smaller, and not careless.
+
+In `ob-report-flags` two optional flags needed a clean usage error. The unguided agent wrote a function to build the parser and two validators with their own messages. The full system handed both conversions to `argparse` (`type=date.fromisoformat`, `type=int`), which already turns a bad value into a usage error, and kept one explicit check for a negative limit.
+
+The cases also show something less flattering. Two of the full system's three final messages are empty: the step it stopped at and the `left out:` lines that the output contract asks for are missing, which is the same finding the debt ledger makes across every episode in S91.
+
+#%% md
+## S90 - Why runs failed
+
+**Theory.** A pass rate hides its failures' causes, and the causes matter more than the rate. A run that hit the turn limit tells you about the budget, one that broke the protocol tells you about the model, one that wrote unsafe code tells you about the rules. Every run that did not pass is assigned the first cause that explains it, in a fixed order: an API failure, the turn limit, protocol errors, the time limit, an edited protected file, an unsafe answer, a wrong or incomplete one, a failed quality trap. The second table is the one a careful reader should want: tasks the unguided agent passed in both runs and the full system failed in at least one, which is where the system cost something.
+
+**In plain terms.** Every failed run, sorted by what went wrong, and a list of the tickets where the system made things worse.
+
+#%% md
+**`failure_cause(run)`** gives every run that did not pass exactly one cause: the first in `FAILURE_ORDER` that applies. The order runs from causes outside the code (the API, the turn limit, the protocol, the clock) to the code itself (a protected file edited, then unsafe, wrong, or failing its quality trap), so a run that hit the turn limit with broken code is counted as a budget problem, not a code problem. A single cause per run keeps the counts adding up to the number of failures, at the price of hiding the second cause; the exercises at the end of this Part come back to that.
+
+#%% code
+# the order causes are tried in: a run is counted under the first one that applies
+FAILURE_ORDER = ("API failure", "turn limit", "protocol errors", "time limit", "edited a protected file", "unsafe",
+                 "wrong or incomplete", "quality trap")
+
+def failure_cause(run):
+    """The first cause, in FAILURE_ORDER, that explains why a run did not pass; None if it passed."""
+    if run.error:
+        return "API failure"                                # the run failed before it produced an episode
+    e = run.episode
+    s = run.score
+    if s is None or s.passed:
+        return None                                         # passed, or never scored: not counted as a failure
+    # each remaining cause with its test, in FAILURE_ORDER: how the episode stopped, then what the code did
+    for cause, hit in (("turn limit", e.stop == "max_turns"),
+                       ("protocol errors", e.stop == "protocol"),
+                       ("time limit", e.stop == "deadline"),
+                       ("edited a protected file", not s.protected_ok),
+                       ("unsafe", s.safe == 0),
+                       ("wrong or incomplete", s.correct == 0),
+                       ("quality trap", s.quality == 0)):
+        if hit:
+            return cause
+    return "quality trap"                                   # failed with no listed reason: counted with the traps
+
+show_def(failure_cause, layer="lab")
+
+#%% md
+**Every failed run, by cause.** One row per arm: how many runs it made, how many failed, and the failures split by their first cause.
+
+#%% code
+CAUSES = {}                                                 # arm to a count of its failed runs by cause
+for arm in ARM_NAMES:
+    arm_causes = [failure_cause(r) for r in MAIN if r.arm == arm]   # None for every run that passed
+    CAUSES[arm] = Counter(c for c in arm_causes if c)               # only the failures are counted
+cause_rows = []
+for arm in ARM_NAMES:
+    row = {"arm": arm, "runs": sum(r.arm == arm for r in MAIN), "failed": sum(CAUSES[arm].values())}
+    row.update({c: CAUSES[arm][c] for c in FAILURE_ORDER})          # one column per cause, zeros included
+    cause_rows.append(row)
+cause_cols = [("arm", "arm", ""), ("runs", "runs", "d"), ("failed", "failed", "d")] + [(c, c, "d") for c in FAILURE_ORDER]
+table(cause_rows, cause_cols)
+
+#%% md
+**`passes(arm, t)`** lists the hidden-test results of every scored run of one arm on one task, one `True` or `False` per run. It is what the regression test below needs: a task the unguided agent passed every time, set against what the full system did on the same task.
+
+#%% code
+def passes(arm, t):
+    """The hidden-test result of every scored run of an arm on a task, as a list of True and False."""
+    return [r.score.passed for r in MAIN if r.arm == arm and r.task == t and r.score]   # a run with no score is left out
+
+show_def(passes, layer="lab")
+
+#%% md
+**Where the system cost something.** A regression is a task the unguided agent passed in every replica and the full system failed at least once; a task where the full system has no scored run at all counts too. Each is listed with the causes of the full system's runs and what the hidden test said.
+
+#%% code
+REGRESSIONS = []                                            # tasks where the system made things worse
+for t in SUITE:
+    off_passes = passes("off", t)
+    if len(off_passes) != REPLICAS or not all(off_passes):
+        continue                                            # the unguided agent must have passed every replica
+    if all(passes("full", t) or [False]):
+        continue                                            # the full system passed too; no scored run counts as a fail
+    REGRESSIONS.append(t)
+rows = []
+for t in REGRESSIONS:
+    full_runs = [r for r in MAIN if r.arm == "full" and r.task == t]    # every run of the full system on the task
+    causes_text = ", ".join(sorted({failure_cause(r) or "passed" for r in full_runs}))
+    # the hidden test's message from the first full-system run that failed it
+    first_failure = next((r.score.reason for r in full_runs if r.score and not r.score.passed), "")
+    rows.append({"task": t, "category": SUITE[t].category, "causes": causes_text,
+                 "hidden test": textwrap.shorten(first_failure or "-", 70)})
+print(f"\n[regressions] tasks the unguided agent passed every time and the full system did not: {len(REGRESSIONS)}")
+if rows:
+    table(rows, [("task", "task", ""), ("category", "category", ""), ("causes", "full system's runs", ""),
+                 ("hidden test", "what the hidden test said", "")])
+save_exp("failures", {arm: dict(CAUSES[arm]) for arm in ARM_NAMES}
+         | {"regressions": REGRESSIONS, "regressions_text": ", ".join(REGRESSIONS) or "none"})
+
+#%% code
+# FIG  why runs failed
+fig, ax = plt.subplots(figsize=(10, 3.2))
+palette = dict(zip(FAILURE_ORDER, (MUTED, C4, C5, C6, C7, C8, C2, C1)))   # one colour per cause
+left = np.zeros(len(ARM_NAMES))                                           # where each arm's next segment starts
+for cause in FAILURE_ORDER:
+    vals = np.array([CAUSES[a][cause] for a in ARM_NAMES], float)         # this cause's count for every arm
+    if vals.any():                                                        # a cause no arm hit gets no segment and no legend entry
+        ax.barh(range(len(ARM_NAMES)), vals, left=left, color=palette[cause], label=cause)
+        left += vals                                                      # the next cause starts where this one ends
+ax.set_yticks(range(len(ARM_NAMES)), ARM_NAMES)
+ax.invert_yaxis()                                                         # arms top to bottom, in the table's order
+ax.set_xlabel(f"failed runs, out of {sum(r.arm == 'full' for r in MAIN)} per arm")
+ax.legend(fontsize=7, ncol=4, loc="lower right")
+panel(ax, "every run that did not pass, by the first cause that explains it")
+finish(fig, "s90_failures",
+       f"The full system failed {sum(CAUSES['full'].values())} runs, the unguided agent "
+       f"{sum(CAUSES['off'].values())}",
+       f"{len(REGRESSIONS)} tasks passed by the unguided agent every time were "
+       "failed at least once by the full system")
+
+#%% md
+**Reading FIG 23 (s90_failures).** Each bar is one arm's failed runs, split by cause. Two comparisons matter. The first is the *unsafe* segment: the never-cut list exists so that writing less never means checking less, and an arm whose unsafe segment grows has traded safety for size. The second is the share of failures that are not about the code at all (turn limits, protocol errors, API failures), which says how much of a pass-rate difference belongs to the budget or the model rather than to the rules. The regressions table under the code lists, by name, every task where the full system did worse than the unguided agent ({{exp:failures.regressions_text}}), so the cost of the system is visible case by case, not only as an average.
+
+#%% md
+## S91 - The debt the system leaves behind
+
+**Theory.** Writing less now is only responsible if the things left out are written down with the condition for building them, which is what the output contract's `left out:` lines and the `# shortcut:` markers do (S29, S30), and what the debt ledger (S53) collects. This section runs the ledger over every first-replica episode of both arms. Three numbers matter: how much debt each arm records, how much of it has a trigger (a condition for coming back), and what kinds of things were deferred. The unguided agent was never asked to record anything, so its column shows what goes unrecorded by default: the omissions are still there, nobody wrote them down.
+
+**In plain terms.** Everything the agents chose not to build, and whether they said when it should be built.
+
+#%% code
+DEBT = {}                                                   # arm to its ledger entries
+for arm in ("off", "full"):
+    runs_ = [r for r in MAIN if r.arm == arm and r.replica == 0 and r.episode]   # first replica: one run per task
+    debt_workspaces = [r.episode.ws for r in runs_]                             # where the shortcut markers live
+    debt_answers = [(f"{arm}:{r.task}", r.episode.done_text) for r in runs_]     # where the left-out lines live
+    DEBT[arm] = debt_ledger(debt_workspaces, debt_answers)
+print(f"[debt] ledger entries: the unguided agent {len(DEBT['off'])}, the full system {len(DEBT['full'])}")
+
+#%% md
+**The ledger, summed up and listed.** The two numbers to compare are the entries each arm left and how many of them say when to come back; then the full system's own entries, as a reviewer would read them.
+
+#%% code
+rows = []
+for arm in DEBT:
+    rows.append({"arm": arm, "entries": len(DEBT[arm]),
+                 "shortcut markers": sum(e["kind"] == "shortcut" for e in DEBT[arm]),     # '# shortcut:' in the code
+                 "left out": sum(e["kind"] == "left out" for e in DEBT[arm]),             # 'left out:' in the answer
+                 "with a trigger": sum(not e["no trigger"] for e in DEBT[arm]),           # entries that say when
+                 "episodes": sum(r.arm == arm and r.replica == 0 and bool(r.episode) for r in MAIN)})
+table(rows, [("arm", "arm", ""), ("episodes", "episodes", "d"), ("entries", "entries", "d"),
+             ("shortcut markers", "shortcut markers", "d"), ("left out", "left-out lines", "d"),
+             ("with a trigger", "with a trigger", "d")])
+print("\n  the full system's ledger, first twelve entries:")
+table(DEBT["full"][:12], [("where", "where", ""), ("kind", "kind", ""), ("what", "what", ""), ("when", "come back when", ""),
+                          ("no trigger", "no trigger", "")])
+full_eps = sum(r.arm == "full" and r.replica == 0 and bool(r.episode) for r in MAIN)   # the full system's first-replica episodes
+# RARE when the full system left fewer entries than one for every five episodes
+save_exp("debt", {arm: {"entries": len(DEBT[arm]), "with_trigger": sum(not e["no trigger"] for e in DEBT[arm])} for arm in DEBT}
+         | {"amount": "RARE" if len(DEBT["full"]) < 0.2 * full_eps else "COMMON"})
+
+#%% md
+Entries recorded by the full system over its first-replica episodes: {{exp:debt.full.entries}}, of which {{exp:debt.full.with_trigger}} name a condition for coming back. Entries recorded by the unguided agent: {{exp:debt.off.entries}}. {{pick:debt.amount|RARE=That is very little. Across its episodes the full system almost never wrote a `left out:` line or a shortcut marker, so this part of the output contract was largely ignored in practice, which fits the ablation ledger's verdict on "how to answer" (S66): the words were delivered and did not change what the agent wrote. A debt ledger is only as good as the habit of writing to it, and this one shows the habit did not form.|COMMON=An entry without a trigger is the one to fix first, because "later" with no condition is how a deferral becomes permanent. The right way to read the ledger is as a list of decisions a reviewer can disagree with: each line names something that was not built and when it should be.}}
+
+**Part IX recap.** Three tickets read side by side showed what the extra code was made of when the two agents differed most. Every failed run was sorted by cause, with the tasks where the system did worse listed by name, and the debt ledger showed what the system chose not to build and whether it said when to build it. Part X turns from measuring the system to running it: what it costs, how to watch it, and how to point it at your own code.
+
+**Try it yourself.**
+1. Change the rule in S89 to pick the three tasks with the *smallest* difference among those both arms passed. What do the cases have in common?
+2. In S90, move "unsafe" to the front of `FAILURE_ORDER`. Which runs change category, and what does that say about classifying failures by a single cause?
+3. Take one `left out:` line from S91 whose trigger you think is wrong, and write the trigger you would want instead.

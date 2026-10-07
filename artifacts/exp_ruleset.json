@@ -1,0 +1,8 @@
+{
+  "lite": 515,
+  "full": 986,
+  "ultra": 1023,
+  "compact": 481,
+  "invariants": 9,
+  "naive_losses": 4
+}

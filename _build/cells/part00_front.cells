@@ -1,0 +1,136 @@
+#%% md
+# Building a Coding Agent That Refuses to Over-Engineer
+### Proportional code: the smallest change that keeps every promise
+
+A single, end-to-end coding agent, built in this notebook from an empty folder, that answers a ticket with the **smallest change that still keeps every promise the code makes**: the right output, safe handling of untrusted input, no lost data, accessible markup, and anything you explicitly asked for. It talks to real models over an API, it edits real files inside a sandbox, and it is measured against copies of itself with each feature switched off. Every claim below comes with the number that supports it, and the numbers that went the wrong way are reported next to the ones that went the right way.
+
+**The idea in one line.** Over-engineering is a *decision* problem, not a style problem: before any code is written there is almost always a cheaper answer that already exists (nothing at all, a helper three files over, the standard library, the database, one line), and an agent that is made to look for it first, while being forbidden from cutting the things that keep code safe, should write much less code without writing worse code. This notebook builds that agent and then tries hard to prove the "should" wrong.
+
+**Why this is not a prompt trick.** The obvious competitor is a one-line instruction such as *"follow YAGNI and prefer one-liners"*. It costs nothing, so it sits in every experiment as a control arm, next to a second control that only asks for short prose. If either one matches the full system, this notebook will say so. The interesting question is not "can a model be told to write less", it is "can it be made to write less **without** dropping the input check, the root-cause fix, or the feature you asked for", and that is a question about machinery and measurement, not wording.
+
+**What this notebook teaches.** Read top to bottom and you will have built and measured:
+
+- **instruments first**: a line counter that cannot be fooled by comments, ten AST detectors for the usual shapes of over-engineering, a code-golf detector, a guard detector, and a replacement table where every row carries its own test;
+- **tasks that can say no**: 34 tickets with hidden tests and adversarial inputs, a realistic house-style project, three production specs, and a self-test that refuses to spend a single API call until every instrument has been proven;
+- **an agent host from scratch**: a streaming API client with a wall-clock deadline, a response cache that makes every re-run free, a sandbox fence, six tools, an event bus with lifecycle hooks, skills, slash commands, subagents and context compaction;
+- **the system itself**, as a plugin on that host: one ruleset rendered at three strengths, hooks that keep it in front of the model for the whole session, gates that enforce what the rules only ask for, and six skills (`/{{CMD}}`, review, audit, debt, gain, help);
+- **the evaluation discipline**: pre-registered hypotheses, control arms, ablations, held-out tasks, bootstrap intervals, blinded and validated judges, and a final section listing the bugs that made the numbers look better than they were.
+
+**What is deliberately NOT claimed.** We do not claim the agent writes "optimal" code, that fewer lines is always better, or that any of this transfers to languages and model families we did not test. The claim under test is narrower: less added code on held-out tickets, at no loss of safety or completeness. Every effect is printed with its size and interval, the claims table in S87 says which parts of the claim held, and the places where the system costs more than it saves are reported beside the places where it does not.
+
+> **About the committed outputs.** Every API reply this notebook received is stored in `artifacts/cache/llm.sqlite`. The committed outputs come from a final run in `replay` mode, which reads only from that cache and refuses to call the API at all, so re-running the notebook top to bottom reproduces every number and figure without spending anything. Set `LEAN_MODE=collect` to run it live against your own key.
+
+#%% md
+### Results at a glance
+
+Every number below is filled in from the experiment records when the notebook is built, and each row points to the section that produced it. The verdicts were decided by rules written down before the main run (S61).
+
+| question | what the experiments found | where |
+|---|---|---|
+| Does the full system write less code on held-out tickets? | median ratio {{exp:main.h1.ratio:.2f}} against the unguided agent (95% interval {{exp:main.h1.lo:.2f}} to {{exp:main.h1.hi:.2f}}): {{exp:claims.H1.verdict}} | S64 |
+| Is it as safe? | {{exp:main.h2.diff:+.0%}} on the ten safety tasks: {{exp:claims.H2.verdict}} | S64 |
+| Does it still finish what was asked? | {{exp:main.h3.diff:+.0%}} on explicit and open tasks: {{exp:claims.H3.verdict}} | S64 |
+| Do hooks and gates beat the same words pasted in? | {{exp:main.h4.diff:+.0%}} on reuse, root-cause and platform tasks: {{exp:claims.H4.verdict}} | S64 |
+| Does a bare slogan drop guards? | {{exp:main.h5.diff:+.0%}} in safety against the unguided agent: {{exp:claims.H5.verdict}} | S64 |
+| Which pieces of the system earned their place? | kept: {{exp:shipped.kept}}; removed: {{exp:shipped.removed}} | S66 |
+| On a project whose conventions invite layers? | {{exp:house.full.added:.1f}} lines per ticket against {{exp:house.off.added:.1f}}: {{exp:house.h13}} | S72 |
+| Can the judges be trusted? | {{exp:judges.h9}}, kappa {{exp:judges.kappa:.2f}} | S78 |
+| What does it cost? | {{exp:tradeoff.full.extra_tokens:+,.0f}} tokens per episode against the unguided agent | S93 |
+
+#%% md
+## New to agentic coding? A working vocabulary
+
+This notebook is about software agents, but it assumes nothing beyond Python. If the words below are familiar, skip to the system diagram. If not, this table is enough to follow everything that comes after it.
+
+An **agent** is a loop: a model reads the situation, picks an action (read a file, edit a file, run a check), sees what happened, and goes again until it decides it is done. A **host** is the program that runs that loop and owns the tools. Everything clever in this notebook happens in the gap between "the model picked an action" and "the host carried it out".
+
+| term | plain meaning | in this notebook |
+|---|---|---|
+| **ticket** | a short request for a change, in plain words | the prompt the agent receives, like "add caching to `lookup`" |
+| **workspace** | a private copy of a project the agent may change | a fresh folder per run, deleted or kept for inspection |
+| **tool** | an action the host performs on the model's behalf | six of them: `ls`, `read`, `grep`, `edit`, `run`, `done` |
+| **system prompt** | standing instructions sent before the conversation | where the ruleset lives, in one message, rebuilt every turn |
+| **hook** | a function the host calls at a fixed moment | `session_start`, `user_prompt`, `pre_llm_call`, `subagent_start`, `pre_tool`, `post_tool` |
+| **plugin** | a bundle of hooks and skills added to a host | the system this notebook is about |
+| **skill** | a named, loadable set of instructions | `{{CMD}}`, `{{CMD}}-review`, `{{CMD}}-audit`, `{{CMD}}-debt`, `{{CMD}}-gain`, `{{CMD}}-help` |
+| **subagent** | a second agent started by the first one | the auditor that reads a whole project and lists what could go |
+| **compaction** | shrinking a long conversation to fit the context window | the moment instructions are most easily lost |
+| **rung** | one step of the decision ladder | "already in this codebase?" is rung 2 |
+| **shortcut marker** | a comment that names a deliberate limit and when to lift it | `# shortcut: global lock; upgrade when two accounts contend` |
+| **guard** | the line that stops bad input doing damage | a path containment check, a parameterised query |
+| **arm** | one configuration in an experiment | baseline, slogan, rules-only, full system, ... |
+| **ablation** | the full system with exactly one feature removed | how every feature has to earn its place |
+| **hidden test** | a test the agent never sees | where the adversarial inputs live |
+| **self-test** | proving a measuring instrument works before using it | the reason no API call happens before Part III |
+| **held-out** | tasks frozen before any result was seen | the only tasks the headline claims are made on |
+| **judge** | a model asked to score code on a published rubric | used only where no deterministic check exists, and validated first |
+
+#%% md
+### The ten shapes of over-engineering you will meet
+
+They all look like diligence when they are written, and they all cost the same thing later: code someone has to read, test and keep alive.
+
+1. **The interface with one implementation.** An abstract base class, a protocol, a "pluggable" layer, and exactly one thing ever plugged in.
+2. **The factory with one product.** A registry and a `create()` method that can only ever return one class.
+3. **Configuration for a constant.** A settings object, an environment variable and a validation layer for a value that never changes.
+4. **Speculative parameters.** Flags and options for callers that do not exist.
+5. **Hand-rolled standard library.** Forty lines that `collections.Counter`, `functools.cache` or `argparse` already do, usually with an edge case missed.
+6. **The wrapper that only delegates.** A class whose every method forwards to a dict or a list.
+7. **Defensive ceremony.** Retries around local calls, `try/except` around code that cannot fail, validation of values the program made itself.
+8. **Premature concurrency.** `async`, threads or queues for work that is neither slow nor parallel.
+9. **The needless dependency.** A package installed for something a built-in does, plus the upgrade treadmill that comes with it.
+10. **Prose padding.** Essays in comments and replies defending simple code. A reply that spends three paragraphs justifying five lines has not removed the complexity, it has moved it out of the code and into the prose.
+
+A recurring theme of this notebook: removing these is easy. Removing them **without** also removing the input check, the error handling that prevents data loss, or the thing the user asked for, is the whole difficulty.
+
+**The ten, on one page.** Each branch is one specimen pair in S1 and one detector in S3.
+
+{{diagram:front_shapes}}
+
+#%% md
+## The whole system on one page
+
+Everything in this notebook is one of three things: a **host** that knows how to run an agent but has no opinion about code size, a **plugin** that rides on the host's hooks and carries every idea about proportional code, and a **lab** that measures both. The plugin can be switched off, which turns the full system back into the baseline it is measured against.
+
+{{diagram:overview}}
+
+Read the dotted arrows as "plugs into". The arrow from the lab back into the plugin is the unusual one: a feature that does not measurably help is taken out of the shipped system, so the system has to pass its own rule about not building what is not needed.
+
+**One ticket, start to finish.** The same three layers, seen from a single request. The plugin shapes what the model reads, the gates sit between the model and its tools, and nothing counts as finished until a check exists and the critic has had its say. The score at the bottom comes from the lab, which runs hidden tests rather than taking the agent's word for anything.
+
+{{diagram:front_journey}}
+
+#%% md
+### How to read a section
+
+Every numbered section (S0, S1, ...) has the same parts:
+
+1. **Theory**, and where it helps **In plain terms**: what question this step answers, the method, and the reference if the method has a name. Where a step matters for people running this in a team, a short **For teams** note follows.
+2. **Code**: one function or class per cell. Every definition cell ends with a line like `[def] name(args)  12 lines, complexity 3`, so you always know how much code each idea cost.
+3. **A run**: the code applied to something concrete, printing its inputs, its intermediate values and its result, ending with a one-line verdict.
+4. **A reading**: what the numbers mean, negative results included.
+
+### How to read a feature card
+
+From Part IV onwards, each feature of the system gets the same treatment, so features can be compared fairly:
+
+| step | what you see |
+|---|---|
+| why | the failure the feature exists to prevent |
+| build | the code, one unit per cell |
+| test | red and green cases, including the adversarial ones |
+| live | the same ticket on the same code, feature off and feature on, both diffs printed |
+| evidence | the ablation result from Part VII, with its interval |
+| verdict | **KEPT** or **REJECTED** by a rule written down before the data existed |
+
+### Four ways through this notebook
+
+- **Students**: read the *In plain terms* paragraphs and run the *Try it yourself* exercises at the end of each Part. Skip the statistics in Parts VII and VIII on a first pass.
+- **Developers**: Parts III to VI are the system. S94b shows how to point it at your own folder.
+- **PhD readers**: Part I (instrument validity), S61 (pre-registration), Parts VII and VIII (design, statistics, threats to validity).
+- **Teams and software houses**: the *For teams* notes, the cost sections S92 and S93, and the adoption guide S96.
+
+**The same four routes, drawn.** Pick the row that fits and skim the rest. Every Part opens with a small map of its own, so it is easy to rejoin the main road.
+
+{{diagram:front_paths}}
+

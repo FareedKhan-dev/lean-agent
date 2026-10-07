@@ -1,0 +1,14 @@
+{
+  "id": "op-word-freq",
+  "title": "A word frequency tool",
+  "category": "open",
+  "split": "held-out",
+  "axis": "correct",
+  "rung": 3,
+  "entry": "wordfreq.py",
+  "requirements": [],
+  "python_target": "3.12",
+  "prompt": "Write wordfreq.py, a small command-line tool: `python wordfreq.py FILE` prints the ten most common words in FILE with how often each occurs, most common first. 'Kettle' and 'kettle' are the same word, and punctuation is not part of a word.",
+  "notes": "Open scope: collections.Counter and one regex, a dozen lines. Room to over-build: stop-word lists, output formats, tokeniser classes, options nobody asked for. The lazy-wrong version splits on whitespace and counts 'kettle,' and 'Kettle' as different words.",
+  "extension": "Add `-n N` to choose how many words to show (default 10)."
+}

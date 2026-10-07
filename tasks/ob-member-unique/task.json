@@ -1,0 +1,14 @@
+{
+  "id": "ob-member-unique",
+  "title": "No two members with the same email",
+  "category": "over-build",
+  "split": "held-out",
+  "axis": "quality",
+  "rung": 4,
+  "entry": "members.py",
+  "requirements": [],
+  "python_target": "3.12",
+  "prompt": "Members are getting registered twice with the same email address, sometimes in a different case (Ann@Example.org and ann@example.org). Make sure there can never be two members with the same email. Trying to add a duplicate should raise an error.",
+  "notes": "A UNIQUE COLLATE NOCASE constraint is one line and covers every path into the table. The lazy-wrong version checks inside add_member only; the bulk import still duplicates.",
+  "extension": "Add `find_member(conn, email)` that returns the member's name for an email, ignoring case, or None."
+}

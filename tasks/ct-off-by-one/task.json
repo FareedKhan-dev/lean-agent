@@ -1,0 +1,15 @@
+{
+  "id": "ct-off-by-one",
+  "title": "The last page of a category is missing",
+  "category": "control",
+  "split": "dev",
+  "axis": "correct",
+  "rung": 7,
+  "entry": "shop/pages.py",
+  "requirements": [],
+  "python_target": "3.12",
+  "prompt": "A category with 25 products shows 'page 1 of 2' and the pager stops at page 2, so the last 5 products can never be reached. Fix it.",
+  "notes": "One expression in page_count: division that rounds up. The lazy-wrong fix adds 1, which invents an empty extra page whenever the count divides evenly. A control: there is no room to over-build, and the hidden test allows two changed lines of code.",
+  "extension": "Hide the pager when everything fits on one page: add `needs_pager(total, per_page)`.",
+  "expect": {"bloated": {"quality": 0}}
+}

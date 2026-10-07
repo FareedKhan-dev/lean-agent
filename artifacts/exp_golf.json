@@ -1,0 +1,44 @@
+{
+  "rows": [
+    {
+      "specimen": "vat",
+      "bloated": 17,
+      "lean": 3,
+      "golfed": 1,
+      "lean score": 0,
+      "golfed score": 2,
+      "same": "PASSED"
+    },
+    {
+      "specimen": "top words",
+      "bloated": 17,
+      "lean": 4,
+      "golfed": 1,
+      "lean score": 0,
+      "golfed score": 8,
+      "same": "PASSED"
+    },
+    {
+      "specimen": "session store",
+      "bloated": 24,
+      "lean": 10,
+      "golfed": 2,
+      "lean score": 0,
+      "golfed score": 16,
+      "same": "PASSED"
+    },
+    {
+      "specimen": "port parser",
+      "bloated": 16,
+      "lean": 5,
+      "golfed": 1,
+      "lean score": 0,
+      "golfed score": 2,
+      "same": "FAILED"
+    }
+  ],
+  "broken": [
+    "port parser"
+  ],
+  "shorter_pct": 0.7727
+}

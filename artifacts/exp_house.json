@@ -1,0 +1,39 @@
+{
+  "good_added": 2.8333,
+  "h13": "MORE, BUT PASSING",
+  "off": {
+    "pass": 0.5,
+    "added": 2.6667,
+    "new_files": 0.0,
+    "touched": 0.9167,
+    "ratio": 1.0
+  },
+  "terse": {
+    "pass": 0.9167,
+    "added": 4.3333,
+    "new_files": 0.0,
+    "touched": 1.3333,
+    "ratio": 1.625
+  },
+  "slogan": {
+    "pass": 0.5833,
+    "added": 2.5,
+    "new_files": 0.0,
+    "touched": 1.0,
+    "ratio": 1.0833
+  },
+  "rules": {
+    "pass": 0.75,
+    "added": 2.6667,
+    "new_files": 0.0,
+    "touched": 1.8333,
+    "ratio": 1.25
+  },
+  "full": {
+    "pass": 1.0,
+    "added": 5.25,
+    "new_files": 0.1667,
+    "touched": 2.4167,
+    "ratio": 1.625
+  }
+}

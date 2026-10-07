@@ -1,0 +1,14 @@
+{
+  "id": "ob-tags-dedupe",
+  "title": "Drop repeated tags",
+  "category": "over-build",
+  "split": "held-out",
+  "axis": "quality",
+  "rung": 7,
+  "entry": "tags.py",
+  "requirements": [],
+  "python_target": "3.12",
+  "prompt": "People type the same tag in different cases when they post (Python, python, PYTHON). Implement `unique_tags(tags)` in tags.py: drop the repeats, ignoring case, keep the first spelling of each tag, and keep the original order. Our users write in English and German.",
+  "notes": "A dict keyed by str.casefold, three lines. The lazy-wrong version keys on lower(), which treats Straße and STRASSE as two tags; a set() loses the order; the bloated version builds a normaliser with pluggable steps.",
+  "extension": "Tags typed with stray spaces (' python ') should count as the same tag. Strip them."
+}

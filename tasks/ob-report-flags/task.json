@@ -1,0 +1,14 @@
+{
+  "id": "ob-report-flags",
+  "title": "Add --since and --limit to the sales report",
+  "category": "over-build",
+  "split": "held-out",
+  "axis": "quality",
+  "rung": 3,
+  "entry": "report.py",
+  "requirements": [],
+  "python_target": "3.12",
+  "prompt": "Add two command-line options to report.py: `--since 2026-03-02` to count only sales on or after that day, and `--limit 2` to show only the top N products. Both are optional. A bad date or a limit that is not a number must give a short usage error, not a traceback.",
+  "notes": "argparse does flags, types, usage and exit code 2 for free. The lazy-wrong version slices sys.argv and crashes with a traceback on a bad date.",
+  "extension": "Add a `--product kettle` option that shows only one product's total."
+}

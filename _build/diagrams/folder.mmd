@@ -1,0 +1,16 @@
+flowchart TB
+    %%STYLES%%
+    U["📁 <b>your folder</b><br/>read, never written"]:::grey -- "fingerprint taken" --> CP["📋 <b>a copy</b><br/>without .git · .venv · caches · binaries · huge files<br/>every skip reported with its reason"]:::host
+    CP --> RUN["🤖 <b>the shipped system works the ticket</b><br/>on the copy, inside the fence"]:::plugin
+    RUN --> PATCH["🩹 <b>a patch</b><br/>a unified diff for git apply"]:::lab
+    RUN --> REP["🧾 <b>a report</b><br/>step · left out · shortcuts<br/>critic · gates · code added"]:::lab
+    PATCH --> CHK
+    REP --> CHK
+    subgraph CHK["✅ four checks on every call"]
+        direction TB
+        C1["🔒 the folder's fingerprint<br/>is unchanged"]:::grey
+        C2["🔁 the patch on a fresh copy<br/>reproduces the result"]:::grey
+        C3["🚧 a write into your<br/>folder is refused"]:::grey
+        C4["📄 an unreadable file is<br/>reported, never crashed on"]:::grey
+    end
+    style CHK fill:#f5fbf8,stroke:#1baf7a

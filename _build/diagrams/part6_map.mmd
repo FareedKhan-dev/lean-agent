@@ -1,0 +1,14 @@
+flowchart TB
+    %%STYLES%%
+    S["🚀 <b>session start</b>"]:::grey --> MAP["🗺️ <b>project map</b><br/>what already exists"]:::plugin
+    E["✏️ <b>an edit</b>"]:::grey --> RG{"📖 file read first?"}:::gold
+    RG -- "no" --> D1["⛔ refused: read it first"]:::warn
+    RG -- "yes" --> DG{"📦 new import or<br/>newer Python?"}:::gold
+    DG -- "yes" --> D2["⛔ refused: not declared"]:::warn
+    DG -- "no" --> RUN["✅ edit applied"]:::plugin
+    RUN --> SIB["👥 <b>sibling scan</b><br/>other callers of what changed"]:::plugin
+    F["🏁 <b>done</b>"]:::grey --> CH{"🧪 a check left?"}:::gold
+    CH -- "no, ask once" --> D3["🔔 nudge"]:::gold
+    CH -- "yes" --> CR["🔍 <b>critic reviews<br/>the change</b>"]:::plugin
+    CR -- "findings" --> T["✂️ trim · a guard may not go"]:::host
+    CR -- "lean already" --> OK["🎉 finished"]:::plugin

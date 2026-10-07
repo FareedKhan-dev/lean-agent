@@ -1,0 +1,24 @@
+flowchart LR
+    %%STYLES%%
+    subgraph BEFORE["📚 before · past the context budget"]
+        direction TB
+        s1["🧠 <b>system message</b><br/>host · project rules<br/>our rules · map · skills"]:::host
+        t1["🎫 the first ticket"]:::grey
+        o1["... dozens of reads,<br/>edits and results ..."]:::grey
+        r1["🎫 the latest request"]:::grey
+        l1["🔁 the last three exchanges"]:::grey
+        s1 ~~~ t1 ~~~ o1 ~~~ r1 ~~~ l1
+    end
+    subgraph AFTER["✂️ after compaction"]
+        direction TB
+        s2["🧠 <b>system message</b><br/>only the host's<br/>own instructions"]:::warn
+        t2["🎫 the first ticket"]:::grey
+        o2["📝 <b>one summary</b><br/>the earlier steps, listed"]:::gold
+        r2["🎫 the latest request,<br/>word for word"]:::grey
+        l2["🔁 the last three exchanges"]:::grey
+        s2 ~~~ t2 ~~~ o2 ~~~ r2 ~~~ l2
+    end
+    BEFORE == "compact" ==> AFTER
+    AFTER -. "session_start<br/>(compact)" .-> fix["🪝 <b>the plugin<br/>puts its<br/>rules back</b>"]:::plugin
+    style BEFORE fill:#f7faff,stroke:#2a78d6
+    style AFTER fill:#fffaf3,stroke:#eb6834

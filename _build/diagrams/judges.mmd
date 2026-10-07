@@ -1,0 +1,22 @@
+flowchart TB
+    %%STYLES%%
+    D["🙈 <b>a blinded diff</b><br/>rebuilt from the syntax tree: no comments,<br/>no docstrings, no final message, no arm name"]:::grey
+    D --> J1["⚖️ <b>judge 1</b>"]:::plum
+    D --> J2["⚖️ <b>judge 2</b>"]:::plum
+    J1 --> V{{"📜 <b>a valid verdict?</b><br/>JSON · every cited line is in the diff"}}:::gold
+    J2 --> V
+    V -- "no" --> REF["⛔ <b>refused</b><br/>not repaired"]:::warn
+    V -- "yes" --> VAL
+    subgraph VAL["🧪 validated before any verdict is used"]
+        direction TB
+        KP["🎯 <b>known pairs</b><br/>bloated above good<br/>on 90% of tasks"]:::lab
+        AG["🤝 <b>agreement</b><br/>weighted kappa<br/>at least 0.6"]:::lab
+        RT["🔁 <b>test-retest</b><br/>the same answer<br/>twice?"]:::lab
+        WT["🎫 <b>wrong ticket</b><br/>must say the change<br/>is not complete"]:::lab
+        KP ~~~ RT
+        AG ~~~ WT
+    end
+    VAL --> G{"bars met?"}:::gold
+    G -- "yes" --> USE["✅ <b>VALID</b> · used"]:::plugin
+    G -- "no" --> SHOW["⚪ <b>printed</b>, nothing built on them"]:::grey
+    style VAL fill:#fffaf3,stroke:#eb6834

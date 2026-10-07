@@ -1,0 +1,17 @@
+{
+  "host": {
+    "definitions": 94,
+    "lines": 1069
+  },
+  "plugin": {
+    "definitions": 64,
+    "lines": 795
+  },
+  "lab": {
+    "definitions": 157,
+    "lines": 1893
+  },
+  "shape_findings": 13,
+  "system_third_party": "none",
+  "lab_vs_system": "LARGER"
+}

@@ -1,0 +1,45 @@
+{
+  "rows": [
+    {
+      "pair": "path join",
+      "safe": 2,
+      "lazy": 0,
+      "lines safe": 7,
+      "lines lazy": 3,
+      "guards": "explicit rejection, path containment"
+    },
+    {
+      "pair": "sql lookup",
+      "safe": 1,
+      "lazy": 0,
+      "lines safe": 2,
+      "lines lazy": 2,
+      "guards": "placeholder query"
+    },
+    {
+      "pair": "token check",
+      "safe": 1,
+      "lazy": 0,
+      "lines safe": 5,
+      "lines lazy": 2,
+      "guards": "constant-time compare"
+    },
+    {
+      "pair": "csv total",
+      "safe": 1,
+      "lazy": 0,
+      "lines safe": 10,
+      "lines lazy": 4,
+      "guards": "per-row error handling"
+    },
+    {
+      "pair": "caption html",
+      "safe": 4,
+      "lazy": 0,
+      "lines safe": 3,
+      "lines lazy": 2,
+      "guards": "alt text, html escaping"
+    }
+  ],
+  "missed": []
+}

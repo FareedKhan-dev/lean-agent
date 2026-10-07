@@ -1,0 +1,10 @@
+{
+  "findings": 10,
+  "found": 12,
+  "planted": 12,
+  "recall": 1.0,
+  "precision": 1.0,
+  "decoy_deletes": 0,
+  "decoy_deletes_verified": 0,
+  "turns": 31
+}

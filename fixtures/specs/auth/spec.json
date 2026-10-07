@@ -1,0 +1,2 @@
+{"id": "auth", "prompt": "Build the sign-in module specified in SPEC.md, in accounts/auth.py.",
+ "extension": "Add `logout(token)`: after it, the token no longer works; logging out an unknown token does nothing."}

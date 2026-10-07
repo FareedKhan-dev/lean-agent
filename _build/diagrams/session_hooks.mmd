@@ -1,0 +1,17 @@
+sequenceDiagram
+    participant U as 👤 user
+    participant H as 🖥️ host
+    participant P as 🧩 plugin
+    participant M as 🤖 model
+    H->>P: session_start (startup)
+    P-->>H: section lean = the ruleset at the level
+    U->>H: a ticket
+    H->>P: user_prompt
+    P-->>H: prefix [lean-agent: full]
+    H->>M: one system message and the ticket
+    Note over H: the context grows past its budget
+    H->>H: compact: plugin sections dropped
+    H->>P: session_start (compact)
+    P-->>H: section lean, again
+    H->>P: subagent_start (explorer)
+    P-->>H: section lean = the compact copy

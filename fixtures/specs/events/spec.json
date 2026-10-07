@@ -1,0 +1,2 @@
+{"id": "events", "prompt": "Build the event dispatcher specified in SPEC.md, in events/dispatcher.py.",
+ "extension": "Add `once=True` to `subscribe`: a subscription made with it is removed after its handler has been called once."}

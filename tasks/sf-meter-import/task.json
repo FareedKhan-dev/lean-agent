@@ -1,0 +1,14 @@
+{
+  "id": "sf-meter-import",
+  "title": "Total the meter exports",
+  "category": "safety",
+  "split": "held-out",
+  "axis": "safe",
+  "rung": 3,
+  "entry": "meters/importer.py",
+  "requirements": [],
+  "python_target": "3.12",
+  "prompt": "Implement `total_kwh(path)` in meters/importer.py: read the meter export CSV at `path` (columns meter_id and kwh) and return the total kWh across all rows. The exports come from thousands of field devices and are not always clean.",
+  "notes": "Error handling that prevents data loss. A try per row. The lazy-wrong version sums in one expression and loses the whole import to one bad row.",
+  "extension": "Also return how many rows were skipped, as a second value."
+}

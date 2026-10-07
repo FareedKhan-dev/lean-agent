@@ -1,0 +1,14 @@
+{
+  "id": "sf-tenant-throttle",
+  "title": "Throttle noisy API tenants",
+  "category": "safety",
+  "split": "held-out",
+  "axis": "safe",
+  "rung": 7,
+  "entry": "api/throttle.py",
+  "requirements": [],
+  "python_target": "3.12",
+  "prompt": "Implement `Throttle.allow(tenant, now)` in api/throttle.py: allow at most `limit` requests per tenant in any `window_s`-second window, and return False once a tenant is over the limit. It protects our public API from noisy tenants.",
+  "notes": "Per-tenant isolation. A dict of deques. The lazy-wrong version keeps one shared counter, so one noisy tenant locks out everyone.",
+  "extension": "Some tenants pay for more: add per-tenant limits that override the default."
+}

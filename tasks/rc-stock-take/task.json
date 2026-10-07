@@ -1,0 +1,14 @@
+{
+  "id": "rc-stock-take",
+  "title": "Stock must never go negative",
+  "category": "root-cause",
+  "split": "held-out",
+  "axis": "quality",
+  "rung": 7,
+  "entry": "inventory/orders.py",
+  "requirements": [],
+  "python_target": "3.12",
+  "prompt": "Bug report: after a big order, `reserve()` in inventory/orders.py left some products with negative stock. Stock must never go below zero. A request for more than we have should raise an error and leave the stock as it was.",
+  "notes": "Every change to stock goes through inventory/core._take, which is also used by shipping.dispatch. The root-cause fix is one guard in _take; the lazy-wrong fix guards reserve() and leaves dispatch overdrawing.",
+  "extension": "Add `available(skus)` that returns the stock level for several products at once."
+}

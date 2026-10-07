@@ -1,0 +1,62 @@
+{
+  "h1": {
+    "ratio": 0.8846,
+    "lo": 0.6818,
+    "hi": 1.0,
+    "supported": false
+  },
+  "h2": {
+    "diff": 0.0,
+    "lo": 0.0,
+    "hi": 0.0,
+    "supported": true
+  },
+  "h3": {
+    "diff": 0.0,
+    "lo": 0.0,
+    "hi": 0.0,
+    "supported": true
+  },
+  "h4": {
+    "diff": 0.0,
+    "lo": 0.0,
+    "hi": 0.0,
+    "supported": false
+  },
+  "h5": {
+    "diff": 0.0,
+    "lo": 0.0,
+    "hi": 0.0,
+    "supported": false
+  },
+  "arms": {
+    "off": {
+      "ratio": 1.0,
+      "pass": 0.94,
+      "safe": 1.0
+    },
+    "terse": {
+      "ratio": 1.0,
+      "pass": 0.88,
+      "safe": 0.95
+    },
+    "slogan": {
+      "ratio": 1.0,
+      "pass": 0.9,
+      "safe": 1.0
+    },
+    "rules": {
+      "ratio": 0.9818,
+      "pass": 0.94,
+      "safe": 1.0
+    },
+    "full": {
+      "ratio": 0.8846,
+      "pass": 0.96,
+      "safe": 1.0
+    }
+  },
+  "runs": 340,
+  "failed": 0,
+  "summary": "code ratio 0.88 (0.68 to 1.00) on held-out tasks; safety +0%; completeness +0%"
+}

@@ -1,0 +1,9 @@
+flowchart TB
+    %%STYLES%%
+    E["📣 <b>an event</b><br/>with its payload"]:::grey --> H["🪝 <b>each hook in turn</b><br/>lowest priority number first · each in its own thread"]:::host
+    H --> O{{"🩺 <b>how did it go?</b>"}}:::gold
+    O -- "ok" --> A1["✅ <b>its answer<br/>is used</b>"]:::plugin
+    O -- "slow:<br/>over budget" --> A2["🐢 <b>used, and<br/>noted as slow</b>"]:::gold
+    O -- "error" --> A3["⚠️ <b>fail open</b><br/>logged · counted<br/>the agent carries on"]:::warn
+    O -- "hung:<br/>running at 5 s" --> A4["🧊 <b>abandoned</b><br/>counted<br/>the agent carries on"]:::warn
+    A1 & A2 & A3 & A4 --> R["📋 <b>health report</b><br/>ok · slow · error · hung, for every hook"]:::host

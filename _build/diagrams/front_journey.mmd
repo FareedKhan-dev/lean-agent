@@ -1,0 +1,23 @@
+flowchart TB
+    %%STYLES%%
+    t["🎫 <b>a ticket arrives</b><br/>make repeated postcode lookups fast"]:::grey
+    subgraph A["① the plugin shapes the request"]
+        direction LR
+        a1["🪝 <b>prompt hook</b><br/>adds the level header"]:::plugin --> a2["📜 <b>rules</b><br/>one section of the<br/>system message"]:::plugin --> a3["🗺️ <b>project map</b><br/>what already exists"]:::plugin
+    end
+    subgraph B["② the agent works, one action per turn"]
+        direction LR
+        m["🤖 <b>model</b><br/>notes and one action"]:::host --> g{"🚦 <b>gates</b><br/>read first?<br/>declared?"}:::gold
+        g -- "refused, with the reason" --> m
+        g -- "allowed" --> tool["🧰 <b>tool</b><br/>runs inside the fence"]:::host
+        tool -- "result" --> m
+    end
+    subgraph C["③ before it may finish"]
+        direction LR
+        n["✅ <b>check nudge</b><br/>leave one runnable check"]:::plugin --> cr["🔍 <b>critic</b><br/>what could go?"]:::plugin --> d["🏁 <b>done</b>"]:::gold
+    end
+    s["📏 <b>scored</b><br/>hidden test · meter · guards"]:::lab
+    t --> A --> B --> C --> s
+    style A fill:#f5fbf8,stroke:#1baf7a
+    style B fill:#f7faff,stroke:#2a78d6
+    style C fill:#f5fbf8,stroke:#1baf7a

@@ -1,0 +1,103 @@
+{
+  "safety tasks|off": {
+    "pass": 1.0,
+    "ratio": 1.0,
+    "guards": 2.45
+  },
+  "safety tasks|terse": {
+    "pass": 0.9,
+    "ratio": 0.8825,
+    "guards": 2.35
+  },
+  "safety tasks|slogan": {
+    "pass": 1.0,
+    "ratio": 0.917,
+    "guards": 2.35
+  },
+  "safety tasks|rules": {
+    "pass": 0.9,
+    "ratio": 0.9,
+    "guards": 2.3
+  },
+  "safety tasks|full": {
+    "pass": 1.0,
+    "ratio": 0.825,
+    "guards": 2.95
+  },
+  "reuse and root cause|off": {
+    "pass": 1.0,
+    "ratio": 1.0,
+    "guards": 0.25
+  },
+  "reuse and root cause|terse": {
+    "pass": 0.8333,
+    "ratio": 1.0,
+    "guards": 0.25
+  },
+  "reuse and root cause|slogan": {
+    "pass": 0.9167,
+    "ratio": 1.0,
+    "guards": 0.0833
+  },
+  "reuse and root cause|rules": {
+    "pass": 1.0,
+    "ratio": 1.0,
+    "guards": 0.1667
+  },
+  "reuse and root cause|full": {
+    "pass": 1.0,
+    "ratio": 0.9375,
+    "guards": 0.3333
+  },
+  "over-build|off": {
+    "pass": 1.0,
+    "ratio": 1.0,
+    "guards": 0.5
+  },
+  "over-build|terse": {
+    "pass": 1.0,
+    "ratio": 1.0,
+    "guards": 1.0
+  },
+  "over-build|slogan": {
+    "pass": 1.0,
+    "ratio": 0.9833,
+    "guards": 0.875
+  },
+  "over-build|rules": {
+    "pass": 1.0,
+    "ratio": 0.8803,
+    "guards": 1.0
+  },
+  "over-build|full": {
+    "pass": 1.0,
+    "ratio": 0.9083,
+    "guards": 0.625
+  },
+  "held-out|off": {
+    "pass": 0.94,
+    "ratio": 1.0,
+    "guards": 0.68
+  },
+  "held-out|terse": {
+    "pass": 0.88,
+    "ratio": 1.0,
+    "guards": 0.86
+  },
+  "held-out|slogan": {
+    "pass": 0.9,
+    "ratio": 1.0,
+    "guards": 0.82
+  },
+  "held-out|rules": {
+    "pass": 0.94,
+    "ratio": 0.9818,
+    "guards": 0.88
+  },
+  "held-out|full": {
+    "pass": 0.96,
+    "ratio": 0.8846,
+    "guards": 1.04
+  },
+  "asymmetry": "BOTH"
+}

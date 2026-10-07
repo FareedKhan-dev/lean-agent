@@ -1,0 +1,1334 @@
+#%% md
+# Part VI - Plugin III: gates, a critic and skills
+
+Words ask; gates make sure.
+
+**Where this sits.** Parts IV and V gave the model rules and made sure it received them. Everything in those Parts still depends on the model choosing to follow what it read. This Part adds the pieces that do not: **gates** that sit on the agent's tools and refuse an action, or annotate its result, whatever the model intended. A map of the project arrives at the start of the session, so existing helpers are visible before anything is written. A read gate refuses to edit a file the agent has not opened. A sibling scan names the other callers of a shared helper as soon as the agent touches code that uses it. A dependency gate refuses imports the project does not declare and features its Python version does not have. A one-time nudge asks for a check before finishing. A critic reviews the change before the agent may finish, and a trim guard refuses any follow-up edit that removes a guard. Then come the **skills** a user calls by name: review, audit (tested against a project with known bloat planted in it), debt, gain and help. Each piece is an hypothesis about machinery beating words, and Part VII keeps only the pieces that earn their place (H4).
+
+**By the end of this Part you can** turn a rule into a gate, tell a gate that helps from one that only adds turns, run a critic inside the loop without letting it delete guards, measure an audit's recall and precision against planted ground truth, and see why "search before you delete" needs a second safety net.
+
+{{diagram:part6_map}}
+
+#%% md
+## S45 - A map of the project
+
+**Theory.** The cheapest moment to stop an agent rebuilding a helper is before it starts writing, and the cheapest way is to show it what exists. The map is one line per source file: its length and its top-level functions and classes with their parameters. For our tasks that is a few hundred tokens; for a large repository it is capped, and Part X's folder runner relies on the cap. The map does not replace reading (S46 makes sure of that). It answers the question *what is there to read?*, which is the question an agent skips when it assumes the helper it needs does not exist yet.
+
+**In plain terms.** At the start, the agent gets a one-page list of every file and the functions in it.
+
+#%% md
+**`repo_map(ws, cap=2400)`** builds that list: one line per Python source file, giving its length and the functions and classes defined at its top level, each function with its positional parameters. Only the top level is listed, because that is what another module can import and reuse, and test files are left out, because a helper that lives in a test is not one the agent should call. A file that does not parse still gets its line, saying so, rather than quietly vanishing from the map. The cap keeps a large project from flooding the system message: the text is cut back to the last whole line that fits and marked as truncated.
+
+#%% code
+def repo_map(ws, cap=2400):
+    """One line per source file: its length and its top-level functions and classes."""
+    lines = []                                                # one entry per file, in path order
+    for path, text in snapshot(ws).items():                   # snapshot already leaves out harness folders and caches
+        if not path.endswith(".py") or is_test_file(path):    # tests and non-Python files hold nothing to reuse
+            continue
+        tree = _safe_parse(text)                              # None when the file does not parse
+        if tree is None:
+            lines.append(f"{path} ({len(text.splitlines())} lines): does not parse")   # still listed, so a broken file is not invisible
+            continue
+        defs = []                                             # what this file offers the rest of the project
+        for n in tree.body:                                   # the top level only: what another module can import
+            if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                defs.append(f"{n.name}({', '.join(a.arg for a in n.args.args)})")   # a function with its parameter names
+            elif isinstance(n, ast.ClassDef):
+                defs.append(f"class {n.name}")                # a class by its name only
+        # "path (N lines): f(a, b), class C", or "no functions" for a file that defines none
+        lines.append(f"{path} ({len(text.splitlines())} lines): {', '.join(defs) or 'no functions'}")
+    text = "Project map:\n" + "\n".join(lines)                # a heading, then the files
+    if len(text) <= cap:                                      # a small project fits whole
+        return text
+    return text[:cap].rsplit("\n", 1)[0] + "\n(map truncated)"   # back to the last whole line, and say so
+
+show_def(repo_map, layer="plugin")
+
+#%% md
+The map for `ru-badge-name`, a reuse task: the ticket asks for names printed on conference badges, and the project already has a function that formats names.
+
+#%% code
+t = SUITE["ru-badge-name"]
+map_ws = materialise(t, WS_DIR / "map-demo")                  # a fresh copy of the seed, as an episode starts
+print(textwrap.indent(repo_map(map_ws), "  "))
+print(f"\n  about {tokens_of(repo_map(map_ws))} tokens; the helper the ticket needs, "
+      f"people/names.display_name, is on the map before the agent reads a single file")
+
+#%% md
+## S46 to S49 - Four gates
+
+**Theory.** Each gate turns one rule from Part IV into something the host enforces.
+
+- **The read gate** (S46, from *read first*) refuses an edit to an existing file the agent has not read in this session. New files are exempt, and a refusal costs one turn: the agent reads the file and tries again, now knowing what is in it.
+- **The sibling scan** (S47, from *fix a bug where it starts*) runs after every successful edit. It finds the project helpers the edited code calls and lists the *other* places that call the same helper. When an agent patches a symptom in one caller, the note it reads next says, in effect, "the function you are working around is also used over there". When it fixes the helper itself, the note confirms which callers the fix covers.
+- **The dependency and runtime gate** (S48, from steps 3 and 5 of the ladder) reads the edit before it is applied. It refuses an import the project does not declare (with a standard-library alternative where one is known), and a language or library feature newer than the Python version in `pyproject.toml`.
+- **The check nudge** (S49, from *prove it*) holds back the first `done` of each request in which code was added but no check was, and asks once for a few asserts. It never asks twice, because a gate that can loop is a bug.
+
+Gates refuse with a reason written for the model, never with an error code, because the reason is the only thing the model learns from.
+
+**In plain terms.** Four checkpoints on the agent's tools: read before editing, see who else calls the helper, no new packages or newer Python than the project allows, and leave a test before finishing.
+
+#%% md
+The gates need a few helpers, and they come first because the class uses them. **`MODULE_HINTS`** is the first of three small tables behind the dependency and runtime gate: it pairs a package an agent tends to reach for with what the standard library already offers for the same job, so a refusal can name the alternative instead of only saying no. It is advice, not the rule: an undeclared import is refused whether or not it has a hint.
+
+#%% code
+MODULE_HINTS = {   # a package an agent reaches for, and what this project already has instead
+    # dates and time zones
+    "dateutil": "date.fromisoformat or datetime.fromisoformat",
+    "pytz": "zoneinfo.ZoneInfo",
+    "arrow": "datetime and zoneinfo",
+    "pendulum": "datetime and zoneinfo",
+    # serialisation, records and configuration
+    "simplejson": "json",
+    "ujson": "json",
+    "attrs": "dataclasses",
+    "toml": "tomllib (Python 3.11+)",
+    # small utilities
+    "cachetools": "functools.lru_cache",
+    "more_itertools": "itertools",
+    # the heavy ones, when the job is small
+    "requests": "urllib.request, if a few calls are all you need",
+    "pandas": "csv and collections, for a few columns",
+    "numpy": "statistics and math, for a few numbers",
+}
+print(f"[deps] {len(MODULE_HINTS)} packages with a standard-library answer ready; for example pandas: {MODULE_HINTS['pandas']}")
+
+#%% md
+**`NEWER_NAMES`** is the table for the runtime half: a name that only exists from a given Python version, with that version and the label a refusal will use. The gate looks for these names in the code an edit would leave behind. Matching by name is crude (any attribute called `batched` matches), but it catches the realistic case, an agent writing `itertools.batched` in a project that promises to run on Python 3.9, without importing or running anything.
+
+#%% code
+NEWER_NAMES = {                                               # name: (major, minor, the label a refusal uses)
+    "batched": (3, 12, "itertools.batched"),
+    "pairwise": (3, 10, "itertools.pairwise"),
+    "tomllib": (3, 11, "tomllib"),
+    "TaskGroup": (3, 11, "asyncio.TaskGroup"),
+    "ExceptionGroup": (3, 11, "ExceptionGroup"),
+    "StrEnum": (3, 11, "enum.StrEnum"),
+    "Self": (3, 11, "typing.Self"),
+    "TypeAlias": (3, 10, "typing.TypeAlias"),
+    "ParamSpec": (3, 10, "typing.ParamSpec"),
+    "bit_count": (3, 10, "int.bit_count"),
+}
+for newer_name, newer_spec in NEWER_NAMES.items():
+    print(f"[runtime] {newer_name:<15} needs Python {newer_spec[0]}.{newer_spec[1]} ({newer_spec[2]})")
+
+#%% md
+**`declared_dependencies(ws)`** reads the two places a Python project declares its packages, `requirements.txt` and the `dependencies` list in `pyproject.toml`, and returns the bare package names in lower case. The idea that makes it work is to cut each requirement at the first character that cannot be part of a name (a version operator, an extras bracket, a marker or a space), so `requests>=2.31` and `rich[jupyter]` come back as `requests` and `rich`. Both files are read as plain text with regular expressions, which is enough for the short, flat lists these projects carry; the `pyproject.toml` list ends at the first `]` outside quotes, because an extra such as `requests[socks]` carries brackets of its own.
+
+#%% code
+def declared_dependencies(ws):
+    """Package names the project declares in requirements.txt or pyproject.toml."""
+    names, ws = set(), Path(ws)                                   # a set: a package declared twice counts once
+    if (ws / "requirements.txt").is_file():                       # pip's format: one requirement per line
+        for line in (ws / "requirements.txt").read_text(encoding="utf-8").splitlines():
+            if line.strip() and not line.startswith("#"):         # skip blank lines and comment lines
+                # the name ends where a version, an extra, a marker or a space begins
+                names.add(re.split(r"[<>=!~\[; ]", line.strip())[0].lower())
+    if (ws / "pyproject.toml").is_file():                         # where a modern project keeps its list
+        # the list after "dependencies = [", up to the first "]" outside quotes: an extra such as
+        # "requests[socks]" carries brackets of its own
+        deps = re.search(r"dependencies\s*=\s*\[((?:\"[^\"]*\"|'[^']*'|[^\]\"'])*)\]",
+                         (ws / "pyproject.toml").read_text(encoding="utf-8"))
+        entries = re.findall(r"\"[^\"]*\"|'[^']*'", deps.group(1)) if deps else []   # each quoted requirement, quotes included
+        for entry in entries:
+            if entry.strip():                                     # an empty string declares nothing
+                names.add(re.split(r"[<>=!~\[; ]", entry.strip().strip("'\""))[0].lower())   # unquote, then cut as above
+    return names - {""}                                           # a line such as ">=1" would leave an empty name
+
+show_def(declared_dependencies, layer="plugin")
+
+#%% md
+A scratch project shows both files being read: a `requirements.txt` with a comment line, a pin, an inline comment and an extra, and a `pyproject.toml` with a Python floor and three dependencies, one with an extra in brackets.
+
+#%% code
+deps_demo = RUNTIME / "demo" / "deps-project"                 # a scratch project, outside every task
+shutil.rmtree(deps_demo, ignore_errors=True)
+deps_demo.mkdir(parents=True)
+(deps_demo / "requirements.txt").write_text("# runtime\nrequests>=2.31\nPyYAML==6.0  # config files\nrich[jupyter]\n",
+                                            encoding="utf-8")
+(deps_demo / "pyproject.toml").write_text('[project]\nname = "demo"\nrequires-python = ">=3.9"\n'
+                                          'dependencies = ["python-dateutil>=2.8", "requests[socks]>=2", "attrs"]\n',
+                                          encoding="utf-8")
+print(f"[deps] the scratch project declares {sorted(declared_dependencies(deps_demo))}")
+print(f"[deps] the runtime task declares {sorted(declared_dependencies(SUITE['eg-target-runtime'].folder / 'seed')) or 'nothing'}")
+
+#%% md
+**`declared_python(ws)`** answers one question: what is the oldest Python this project promises to run on? It reads the `requires-python` floor from `pyproject.toml` and returns it as a tuple such as `(3, 9)`, which compares directly with the versions in `NEWER_NAMES`. Only a `>=` floor is read. A project that declares nothing, or declares it some other way, gets `None`, and the runtime half of the gate then has nothing to enforce.
+
+#%% code
+def declared_python(ws):
+    """(3, minor) from requires-python, or None."""
+    p = Path(ws) / "pyproject.toml"                           # where a project states the Python it supports
+    if not p.is_file():                                       # no pyproject.toml: no promise to hold the agent to
+        return None
+    # the minor version in a floor such as requires-python = ">=3.9"
+    m = re.search(r'requires-python\s*=\s*"\s*>=\s*3\.(\d+)', p.read_text(encoding="utf-8"))
+    return (3, int(m.group(1))) if m else None                # a tuple, so it compares with (3, 12) directly
+
+show_def(declared_python, layer="plugin")
+
+#%% code
+for py_floor_task in ("eg-target-runtime", "eg-batches", "ob-postcode-cache"):
+    py_floor = declared_python(SUITE[py_floor_task].folder / "seed")   # read straight from the task's seed folder
+    print(f"[runtime] {py_floor_task:<18} {py_floor or 'declares no floor'}")
+print(f"[runtime] {'scratch project':<18} {declared_python(deps_demo)}")
+
+#%% md
+**`newer_features(src)`** lists the features in a piece of source that need a newer Python than some projects promise, as `(major, minor, feature)` triples, oldest first. It walks the syntax tree once and looks at three kinds of node: a name or attribute listed in `NEWER_NAMES`, including one that is only imported; a `match` statement; and a call to `zip` with `strict=`. Working on the tree rather than the text means a feature mentioned in a comment or a string is not counted, and source that does not parse gives an empty list.
+
+#%% code
+def newer_features(src):
+    """[(version, feature)] for features that need a newer Python, found in src."""
+    tree = _safe_parse(src)                                   # None for source that does not parse
+    if tree is None:
+        return []
+    found = set()                                             # a feature used ten times is reported once
+    for n in ast.walk(tree):                                  # every node, however deeply nested
+        name = None                                           # the identifier this node uses, if it has one
+        if isinstance(n, ast.Attribute):
+            name = n.attr                                     # itertools.batched, n.bit_count()
+        elif isinstance(n, ast.Name):
+            name = n.id                                       # batched, after a from-import
+        if isinstance(n, (ast.Import, ast.ImportFrom)):
+            # an import is enough on its own: an older Python fails on that line, before any call
+            name = next((a.name.split(".")[-1] for a in n.names if a.name.split(".")[-1] in NEWER_NAMES), None)
+            if isinstance(n, ast.ImportFrom) and n.module == "tomllib":
+                name = "tomllib"                              # from tomllib import loads: the module itself is new
+        if name in NEWER_NAMES:
+            found.add(NEWER_NAMES[name][:2] + (NEWER_NAMES[name][2],))   # (major, minor, feature)
+        if isinstance(n, ast.Match):                          # match and case arrived in 3.10
+            found.add((3, 10, "the match statement"))
+        is_zip_call = isinstance(n, ast.Call) and getattr(n.func, "id", "") == "zip"   # zip(...) by its plain name
+        if is_zip_call and any(k.arg == "strict" for k in n.keywords):                # strict= arrived in 3.10 too
+            found.add((3, 10, "zip(strict=...)"))
+    return sorted(found)                                      # by version, oldest first
+
+show_def(newer_features, layer="plugin")
+
+#%% code
+newer_demo_src = '''
+import tomllib
+from itertools import batched
+
+def chunks(items):
+    return list(batched(items, 50))     # pairwise, named in a comment, is not counted
+
+def kind(x):
+    match x:
+        case 0:
+            return "zero"
+    return "other"
+'''
+print(f"[runtime] {newer_features(newer_demo_src)}")
+print(f"[runtime] source that does not parse: {newer_features('def broken(:')}")
+
+#%% md
+**`DIST_MODULE`** covers the awkward case where the name you install is not the name you import: you install `python-dateutil` and write `import dateutil`. Declared names pass through this table before an import is compared with them (every other name just has its dashes turned into underscores), so a project that declares `pyyaml` may import `yaml`.
+
+#%% code
+DIST_MODULE = {"python-dateutil": "dateutil", "pyyaml": "yaml", "beautifulsoup4": "bs4", "pillow": "pil",
+               "scikit-learn": "sklearn"}   # where the name on PyPI differs from the name you import
+for dist_name, module_name in DIST_MODULE.items():
+    print(f"[deps] declared {dist_name!r:<18} is imported as {module_name!r}")
+
+#%% md
+**`import_problems(ws, before, after)`** is the dependency and runtime gate as a pure function of one file before and after an edit. It judges only what the edit adds: an import the file already had, or a feature it already used, is not this edit's doing. A new import passes if it is in the standard library, is one of the project's own modules, or is declared; anything else becomes a reason to refuse, with an alternative where `MODULE_HINTS` knows one. If the project declares a Python floor, every new feature above that floor becomes a reason too, and an empty list means the edit may go ahead.
+
+#%% code
+def import_problems(ws, before, after):
+    """Reasons to refuse an edit that turns `before` into `after`, or []."""
+    # the project's own top-level modules and packages: importing one of those is reuse
+    local = {p.split("/")[0].removesuffix(".py") for p in snapshot(ws)}
+    # declared packages, under the names they are imported by
+    declared = {DIST_MODULE.get(d, d.replace("-", "_")) for d in declared_dependencies(ws)}
+    new_mods = set(_imports(after).values()) - set(_imports(before).values())   # only what this edit brings in
+    out = []                                                  # the reasons, in the order the model will read them
+    for m in sorted(new_mods):                                # sorted, so the same edit always gets the same message
+        if m in sys.stdlib_module_names or m in local or m.lower() in declared:   # standard library, the project, or declared
+            continue
+        # anything else is refused, with the alternative when MODULE_HINTS knows one
+        out.append(f"this project does not depend on {m}; use {MODULE_HINTS.get(m, 'the standard library or code already here')}")
+    target = declared_python(ws)                              # (3, minor), or None
+    if target:                                                # no floor declared: nothing to compare features with
+        old = set(newer_features(before))                     # features the file already used are not the edit's doing
+        for major, minor, feature in newer_features(after):
+            if (major, minor) > target and (major, minor, feature) not in old:   # above the floor, and new
+                # the floor, the feature, and the version that feature needs
+                out.append(f"this project declares Python >= {target[0]}.{target[1]}, and {feature} needs {major}.{minor}")
+    return out
+
+show_def(import_problems, layer="plugin")
+
+#%% md
+Three edits to the runtime task's `notify/sms.py`, judged before any of them is applied: one brings in `pandas`, one uses `itertools.batched` in a project that promises Python 3.9, and one only adds a standard-library import.
+
+#%% code
+deps_task = SUITE["eg-target-runtime"]                        # declares Python >= 3.9 and no dependencies
+sms_seed = deps_task.seed["notify/sms.py"]
+sms_edits = {"import pandas": "import pandas\n" + sms_seed,   # three ways the file could look after an edit
+             "itertools.batched": "from itertools import batched\n" + sms_seed,
+             "import json": "import json\n" + sms_seed}
+for edit_label, sms_edited in sms_edits.items():
+    edit_reasons = import_problems(deps_task.folder / "seed", sms_seed, sms_edited)
+    print(f"[deps] {edit_label:<18} {'; '.join(edit_reasons) or 'allowed'}")
+
+#%% md
+The sibling scan has to know which functions an edit touched. **`changed_functions(before, after)`** answers by comparing source text rather than line numbers: it collects every function and method in both versions with its exact source, and returns the names whose text is new or different. A deleted function is not listed, since there is no code left in it to scan, and if the old version does not parse, every function in the new one counts as changed.
+
+#%% code
+def changed_functions(before, after):
+    """Names of top-level functions (and methods) whose source differs between two versions."""
+    def bodies(src):
+        # every function and method in the file, by name, with its exact source text
+        tree = _safe_parse(src)
+        if tree is None:                                      # a file that does not parse has no functions to compare
+            return {}
+        out = {}                                              # name: source; a later definition of a name wins
+        for n in ast.walk(tree):                              # walk, not body: methods count as well
+            if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                out[n.name] = ast.get_source_segment(src, n)  # from the def line to the end, decorators aside
+        return out
+
+    b, a = bodies(before), bodies(after)                      # the same table for both versions
+    return sorted(name for name in a if a[name] != b.get(name))   # new, or different from before
+
+show_def(changed_functions, layer="plugin")
+
+#%% md
+In `rc-stock-take` the bug lives in a shared helper, `core._take`, and the lazy answer guards one of its callers, `orders.reserve`, instead. Only that caller changed:
+
+#%% code
+stock_task = SUITE["rc-stock-take"]
+orders_seed = stock_task.seed["inventory/orders.py"]
+orders_lazy = (stock_task.folder / "refs" / "lazy" / "inventory" / "orders.py").read_text(encoding="utf-8")
+print(f"[siblings] functions the lazy answer changed in orders.py: {changed_functions(orders_seed, orders_lazy)}")
+
+#%% md
+**`sibling_note(ws, path, before, after)`** is the sibling scan itself. For each function the edit changed, it takes the project helpers that function calls, plus the function itself when it is a top-level project function, and searches every source file for other lines that call the same name; `def` lines and the lines of the edited function do not count. What is left are the other callers, and the note keeps at most three such lines, each naming at most three callers. It ends with the sentence that carries the point, that a fix in the shared helper covers every caller, and it returns `None` when there is nothing to say, so the agent sees no note at all.
+
+#%% code
+def sibling_note(ws, path, before, after):
+    """After an edit: which shared helpers does the changed code call, and who else calls them?"""
+    files = {p: s for p, s in snapshot(ws).items() if p.endswith(".py") and not is_test_file(p)}   # tests are not callers
+    defined = {}                                              # top-level function name: the file that defines it
+    for p, s in files.items():
+        for n in getattr(_safe_parse(s), "body", []):         # a file that does not parse defines nothing
+            if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                defined[n.name] = p
+    tree, changed = _safe_parse(after), changed_functions(before, after)   # the edited file, and what the edit changed
+    if tree is None or not changed:                           # nothing parsed, or nothing changed: nothing to say
+        return None
+    # the definitions of the changed functions, methods included
+    changed_defs = [n for n in ast.walk(tree) if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)) and n.name in changed]
+    lines = []                                                # one line of the note per (function, helper) pair
+    for fn in changed_defs:
+        # every name the function calls, as f() or as obj.f()
+        called = {getattr(c.func, "attr", getattr(c.func, "id", None)) for c in ast.walk(fn) if isinstance(c, ast.Call)}
+        # the project helpers among them, and the function itself if other code may call it
+        for helper in sorted((called & defined.keys()) | ({fn.name} & defined.keys())):
+            sites = []                                        # file:line of every other call
+            for p, s in files.items():
+                for i, line in enumerate(s.splitlines(), 1):  # numbered from 1, as an editor shows them
+                    inside_fn = p == path and fn.lineno <= i <= fn.end_lineno     # the edited function's own lines
+                    # a call of the helper that is not its own def line and not inside the edited function
+                    if re.search(rf"\b{re.escape(helper)}\s*\(", line) and not line.lstrip().startswith("def ") and not inside_fn:
+                        sites.append(f"{p}:{i}")
+            if sites:                                         # a helper nobody else calls needs no note
+                verb = "is" if helper == fn.name else "calls"   # the function itself, or a helper it calls
+                where = "" if helper == fn.name else f" (in {defined[helper]})"   # where the helper lives
+                # e.g. "reserve calls _take (in inventory/core.py), which is also called from inventory/shipping.py:6"
+                lines.append(f"{fn.name} {verb} {helper}" + where + f", which is also called from {', '.join(sites[:3])}")
+    if not lines:                                             # no shared helper in sight: no note at all
+        return None
+    # at most three lines, then the advice that is the point of the note
+    return "Other callers: " + "; ".join(lines[:3]) + ". If the problem is in a shared helper, fixing it there covers every caller."
+
+show_def(sibling_note, layer="plugin")
+
+#%% md
+The same lazy answer, laid over a scratch copy of the project so the scan sees the files as the edit would leave them:
+
+#%% code
+siblings_ws = materialise(stock_task, RUNTIME / "demo" / "siblings", "lazy")   # the seed with the lazy answer on top
+sibling_demo_note = sibling_note(siblings_ws, "inventory/orders.py", orders_seed, snapshot(siblings_ws)["inventory/orders.py"])
+print("[siblings] " + textwrap.fill(sibling_demo_note or "(no note)", 110, subsequent_indent="  "))
+
+#%% md
+**`LeanGates`** is the plugin that carries the map and the four gates. The constructor takes one switch per piece and keeps them in `self.on`, because Part VII's ablations switch pieces off one at a time and `full_system` passes those switches through by name. Besides the constructor, the class body keeps one helper that both edit hooks use: `_rel`, a static method that turns the path the model wrote into the project-relative form the gates record, or `None` when the path leads outside the workspace. The hooks follow, one per cell.
+
+#%% code
+class LeanGates:
+    """The gates: a project map at session start, and checks on edit and on done that do not
+    depend on the model having read the rules. Each can be switched off for Part VII."""
+
+    def __init__(self, project_map=True, read_gate=True, siblings=True, deps=True, check_nudge=True):
+        # one switch per piece, so an ablation can remove exactly one of them
+        self.on = {"map": project_map, "read": read_gate, "siblings": siblings, "deps": deps, "nudge": check_nudge}
+
+    @staticmethod
+    def _rel(ws, path):
+        try:
+            # through the host's path guard, then relative to the workspace, with forward slashes
+            return resolve_in(ws, path).relative_to(Path(ws).resolve()).as_posix()
+        except ToolError:                                     # a path the guard refuses: the tool will say why
+            return None
+
+show_def(LeanGates, layer="plugin")
+
+#%% code
+gates_demo_ws = materialise(SUITE["ob-postcode-cache"], RUNTIME / "demo" / "gates")   # a scratch copy for the demos below
+for raw_path in ("geo.py", "./geo.py", "tests/../geo.py", "../geo.py", "/etc/passwd"):
+    print(f"[gates] _rel({raw_path!r}) gives {LeanGates._rel(gates_demo_ws, raw_path)!r}")
+
+#%% md
+**`LeanGates.install(host)`** wires the plugin to four events on the host's bus: `session_start` for the map and fresh state, `user_prompt` for a reset on every new request, and `pre_tool` and `post_tool` for the gates themselves. Hooks run in order of priority, lowest first, and every refusal reaches the model, so a lower number never silences a later hook; it only puts its reason first, which is why the gates' tool hooks at 20 come before the critic's at 40. Each hook is named (`gates.pre` and so on), so the bus's trace and health report can say which one ran, how long it took and whether it failed.
+
+#%% code
+@method_of(LeanGates)
+def install(self, host):
+    host.bus.on("session_start", self.on_session_start, name="gates.session", priority=30)   # after the rules plugin at 20
+    host.bus.on("user_prompt", self.on_user_prompt, name="gates.request", priority=30)        # each request starts afresh
+    host.bus.on("pre_tool", self.on_pre_tool, name="gates.pre", priority=20)                  # read, dependency and check gates
+    host.bus.on("post_tool", self.on_post_tool, name="gates.post", priority=20)               # read tracking and the sibling scan
+
+show_def(LeanGates.install, layer="plugin")
+
+#%% md
+**`LeanGates.on_session_start(host, ctx, source)`** prepares the gates for a session and hands the model the map. On a fresh start or after `/clear` it creates the state the other hooks share: the files read so far, a snapshot of the workspace as the baseline for the check nudge, the nudge flag, and a log of every time a gate fired. After a compaction the state is kept, because the agent has still read what it read, but the map is returned again: compaction drops every system section except the host's, and a hook that ignored it would lose its section for the rest of the session. The map goes in at rank 30, after the host's instructions, a project rules file and the ruleset.
+
+#%% code
+@method_of(LeanGates)
+def on_session_start(self, host, ctx, source, **_):
+    if source in ("startup", "clear") or "gates" not in host.state:   # a new session, or no state yet
+        # read: files read so far; seed: the baseline the nudge measures from;
+        # nudged: whether this request has had its reminder; log: (gate, file) each time a gate fires
+        host.state["gates"] = {"read": set(), "seed": snapshot(host.ws), "nudged": False, "log": []}
+    if self.on["map"]:                                        # off only for an ablation
+        return {"section": "map", "text": repo_map(host.ws), "rank": 30}   # after the host (0), a project file (10), the rules (20)
+    return None
+
+show_def(LeanGates.on_session_start, layer="plugin")
+
+#%% md
+Called directly on a bare host, with no plugins and no model, the hook returns the map section and leaves its state on the host:
+
+#%% code
+gates_demo_host = Host(label="gates-demo")                    # nothing here calls a model
+gates_demo_host.start_session(gates_demo_ws)
+demo_gates = LeanGates()
+map_answer = demo_gates.on_session_start(gates_demo_host, gates_demo_host.ctx, "startup")
+print(f"[gates] section {map_answer['section']!r} at rank {map_answer['rank']}:")
+print(textwrap.indent(map_answer["text"], "  "))
+print(f"[gates] state kept on the host: {sorted(gates_demo_host.state['gates'])}")
+
+#%% md
+**`LeanGates.on_user_prompt(host)`** runs before each new request reaches the model. It takes a fresh snapshot as the request's baseline and clears the nudge flag, so in a session of several tickets each one is measured on its own and gets its own single reminder. The set of files read is left alone: a file read for the first ticket has still been read.
+
+#%% code
+@method_of(LeanGates)
+def on_user_prompt(self, host, **_):
+    if "gates" in host.state:                 # a new request: its own baseline, its own reminder
+        host.state["gates"].update(seed=snapshot(host.ws), nudged=False)
+
+show_def(LeanGates.on_user_prompt, layer="plugin")
+
+#%% md
+**`LeanGates.on_pre_tool(host, action, ws)`** holds three gates, because all three must decide before an action runs. For an edit, the read gate goes first: replacing text in an existing file that has not been read in this session is refused, with a reason that tells the agent what to do. Then the dependency and runtime gate rebuilds the file as the edit would leave it and asks `import_problems` about the difference. For `done`, the check nudge measures what the request has added since its baseline, and if that is code with no check, it refuses once and sets the flag that stops it refusing again for this request; every refusal is written to the log, which S56's trace prints.
+
+#%% code
+@method_of(LeanGates)
+def on_pre_tool(self, host, action, ws, **_):
+    st = host.state["gates"]                                  # this session's gate state, kept on the host
+    if action.name == "edit":                                 # the read and dependency gates judge edits only
+        rel_path = self._rel(ws, action.args.get("path", ""))
+        if rel_path is None:                                  # the path guard explains this one
+            return None
+        full = Path(ws) / rel_path                            # the file the edit would change, if it exists yet
+        # the read gate: replacing text in an existing file nobody has read in this session
+        if self.on["read"] and full.is_file() and action.args.get("old") and rel_path not in st["read"]:
+            st["log"].append(("read gate", rel_path))
+            return {"deny": f"read {rel_path} before changing it; the rules ask you to read what you change first"}
+        if self.on["deps"]:                                   # the dependency and runtime gate
+            before = full.read_text(encoding="utf-8-sig") if full.is_file() else ""   # a new file starts empty
+            old, new = action.args.get("old", ""), action.args.get("new", "")
+            after = before.replace(old, new, 1) if old else new                      # the file as the edit would leave it
+            problems = import_problems(ws, before, after)     # [] when the edit adds nothing it should not
+            if problems:
+                st["log"].append(("dependency gate", rel_path))
+                return {"deny": "; ".join(problems)}         # every reason at once, so one retry can fix them all
+    # the check nudge: the first done of a request that added code but no check
+    if action.name == "done" and self.on["nudge"] and not st["nudged"]:
+        m = measure_change(st["seed"], snapshot(ws))         # what this request has added so far, by kind
+        if m["added_code"] > 0 and m["added_check"] + m["added_test"] == 0:   # code, and not one line of check
+            st["nudged"] = True                              # never again for this request: a gate that can loop is a bug
+            st["log"].append(("check nudge", ""))
+            return {"deny": "before finishing, leave one runnable check: a few asserts under "
+                            "if __name__ == \"__main__\": or one small test file. If no check fits, say why "
+                            "in your answer. (This reminder appears once.)"}
+    return None
+
+show_def(LeanGates.on_pre_tool, layer="plugin")
+
+#%% md
+Driven directly, the hook shows each refusal on its own. The first edit adds `import pandas` to a file nobody has read; once a read is recorded, the same edit meets the dependency gate instead.
+
+#%% code
+pandas_edit = Action("edit", {"path": "geo.py", "old": "import register", "new": "import pandas\nimport register"})
+print(f"[gates] edit before any read: {demo_gates.on_pre_tool(gates_demo_host, pandas_edit, gates_demo_ws)}")
+gates_demo_host.state["gates"]["read"].add("geo.py")         # what on_post_tool records after a successful read
+print(f"[gates] the same edit after a read: {demo_gates.on_pre_tool(gates_demo_host, pandas_edit, gates_demo_ws)}")
+
+#%% md
+For the nudge, two lines of code go into `geo.py` with no check beside them, and the hook is offered `done` twice. A new request then re-arms the reminder.
+
+#%% code
+nudge_file = gates_demo_ws / "geo.py"                         # written straight to disk, as if an edit had been applied
+nudge_file.write_text(nudge_file.read_text(encoding="utf-8") + "\n\ndef first_code(codes):\n    return sorted(codes)[0]\n",
+                      encoding="utf-8")
+done_action = Action("done", {"text": "Added first_code()."})
+for nudge_try in ("first", "second"):
+    print(f"[gates] {nudge_try} done: {demo_gates.on_pre_tool(gates_demo_host, done_action, gates_demo_ws)}")
+demo_gates.on_user_prompt(gates_demo_host)                    # a new request: a new baseline, the reminder armed again
+print(f"[gates] after a new request: nudged={gates_demo_host.state['gates']['nudged']}")
+print(f"[gates] log: {gates_demo_host.state['gates']['log']}")
+
+#%% md
+**`LeanGates.on_post_tool(host, action, ok, observation, ws)`** runs after a tool has run, and does two things. A successful read is recorded, which is what opens the read gate for that file. A successful edit is followed by the sibling scan: the hook reads the file as the edit left it, rebuilds the earlier version by putting the old text back in place of the new, and passes both to `sibling_note`. If the scan has something to say it comes back as a note, which the host appends to the edit's result, so the agent reads it on its next turn.
+
+#%% code
+@method_of(LeanGates)
+def on_post_tool(self, host, action, ok, observation, ws, **_):
+    st = host.state["gates"]                                         # this session's gate state, kept on the host
+    if action.name == "read" and ok:                                 # a read that failed opens nothing
+        st["read"].add(self._rel(ws, action.args.get("path", "")))   # this file may now be edited
+    if action.name == "edit" and ok and self.on["siblings"]:         # only an edit that went through
+        rel_path = self._rel(ws, action.args.get("path", ""))        # inside the workspace, since the edit worked
+        after = (Path(ws) / rel_path).read_text(encoding="utf-8")    # the file as the edit left it
+        if action.args.get("old"):
+            # put the old text back where the new text is, to rebuild the file as it was
+            before = after.replace(action.args.get("new", ""), action.args.get("old", ""), 1)
+        else:
+            before = ""                                              # the edit created the file
+        note = sibling_note(ws, rel_path, before, after)             # None when there is nothing to say
+        if note:
+            st["log"].append(("sibling scan", rel_path))
+            return {"note": note}                                    # appended to the edit's result
+    return None
+
+show_def(LeanGates.on_post_tool, layer="plugin")
+
+#%% md
+**`_scripted_gate_agent(model, messages, params)`** is a stand-in coder for the gate demos, registered with Part III's scripted model. It recognises its ticket by a marker such as `GATE-READ` in the first user message and replies with the next step of that marker's script, counting the replies it has already sent; when the script runs out, the last step repeats. Every move is fixed in advance, so each gate's outcome below is exact, and no model is called.
+
+#%% code
+# ---- each gate on its own, driven by a scripted agent so every outcome is exact -------
+GATE_SCRIPT = {}                                              # marker in the ticket: the replies, in order
+
+@SCRIPTED.register
+def _scripted_gate_agent(model, messages, params):
+    script = None                                             # the script for this ticket, if it is one of ours
+    for marker, steps in GATE_SCRIPT.items():
+        if marker in messages[1]["content"]:                  # messages[1] is the ticket; [0] is the system message
+            script = steps
+            break
+    if script is None or "coding agent" not in messages[0]["content"]:   # not a gate demo: another responder answers
+        return None
+    replies_so_far = sum(m["role"] == "assistant" for m in messages)   # the agent's own turns so far
+    return script[min(replies_so_far, len(script) - 1)]       # the next step; the last one repeats
+
+show_def(_scripted_gate_agent)
+
+#%% md
+**`gate_run(task_id, marker, script, gates)`** runs one scripted episode. It files the script under its marker, builds a host with only the gates under test and a private ledger held in memory, and adds the marker to the end of the task's own ticket so the stand-in agent can find its script. It returns the host as well as the episode, because the host's state holds the gate log.
+
+#%% code
+def gate_run(task_id, marker, script, gates):
+    """Run a scripted sequence of actions on a task with the gates; return the episode and the host."""
+    GATE_SCRIPT[marker] = script                              # the stand-in agent finds its steps by this marker
+    # a private smoke-mode door to the scripted model: free, and nothing reaches the shared ledger
+    h = Host(llm=LLM("smoke", Ledger(":memory:"), scripted=SCRIPTED), plugins=[gates], label=f"gates-{marker}")
+    ep = run_episode(SUITE[task_id], h, prompt=f"{SUITE[task_id].prompt}\n{marker}")   # the marker rides on the ticket
+    return ep, h
+
+show_def(gate_run)
+
+#%% md
+**The read gate.** The script edits `geo.py` before reading it, then reads it, then sends the same edit again.
+
+#%% code
+seed_geo = SUITE["ob-postcode-cache"].seed["geo.py"]          # geo.py as the seed has it; the script below does not use it
+ep, h = gate_run("ob-postcode-cache", "GATE-READ", [
+    # 1: an edit to a file the agent has not read
+    f'<edit path="geo.py">\n<old>\nimport register\n</old>\n<new>\nfrom functools import cache\n\nimport register\n</new>\n</edit>',
+    '<read path="geo.py"/>',                                  # 2: read it
+    # 3: the same edit, now that the file has been read
+    f'<edit path="geo.py">\n<old>\nimport register\n</old>\n<new>\nfrom functools import cache\n\nimport register\n</new>\n</edit>',
+    "<done>step 3: functools.cache</done>"], LeanGates(siblings=False, deps=False, check_nudge=False))   # only the read gate
+print("[read gate]")
+for t_ in ep.turns:
+    print(f"  {t_.n}  {t_.action:<5} {'ok ' if t_.ok else 'NO '} {textwrap.shorten(t_.observation, 100)}")
+
+#%% md
+**The sibling scan.** The script reads `orders.py` in `rc-stock-take` and replaces it with the lazy answer; the note appended to the edit's result is printed.
+
+#%% code
+rc = SUITE["rc-stock-take"]                                   # the root-cause task
+# the answer that guards the caller instead of fixing the shared helper
+lazy_orders = (rc.folder / "refs" / "lazy" / "inventory" / "orders.py").read_text(encoding="utf-8")
+ep, h = gate_run("rc-stock-take", "GATE-SIBLING", [
+    '<read path="inventory/orders.py"/>',
+    # the whole seed file out, the lazy answer in: reserve() is guarded and core._take is left as it was
+    f'<edit path="inventory/orders.py">\n<old>\n{rc.seed["inventory/orders.py"]}\n</old>\n<new>\n{lazy_orders}\n</new>\n</edit>',
+    "<done>Guarded reserve().</done>"], LeanGates(read_gate=True, deps=False, check_nudge=False))
+print("[sibling scan] after the lazy fix to orders.py:")
+print("  " + textwrap.fill(ep.turns[1].observation.split("\n")[-1], 110, subsequent_indent="  "))   # the note is the last line
+
+#%% md
+**The dependency and runtime gate.** In the runtime task, which promises Python 3.9, the script reads `notify/sms.py`, tries to write the lazy answer, which uses `itertools.batched`, and then tries to add `import pandas`. The two edits are printed.
+
+#%% code
+et = SUITE["eg-target-runtime"]                              # promises Python 3.9 and declares no packages
+batched_sms = (et.folder / "refs" / "lazy" / "notify" / "sms.py").read_text(encoding="utf-8")   # the lazy answer
+ep, h = gate_run("eg-target-runtime", "GATE-DEPS", [
+    '<read path="notify/sms.py"/>',
+    # the lazy answer: itertools.batched, which needs Python 3.12
+    f'<edit path="notify/sms.py">\n<old>\n{et.seed["notify/sms.py"]}\n</old>\n<new>\n{batched_sms}\n</new>\n</edit>',
+    # a package the project does not declare
+    f'<edit path="notify/sms.py">\n<old>\n{et.seed["notify/sms.py"]}\n</old>\n<new>\nimport pandas\n{et.seed["notify/sms.py"]}\n</new>\n</edit>',
+    "<done>Batched the sends.</done>"], LeanGates(read_gate=True, siblings=False, check_nudge=False))
+print("[dependency and runtime gate]")
+for t_ in ep.turns[1:3]:                                       # turns 2 and 3: the two edits
+    print(f"  {t_.n}  {t_.action:<5} {'ok ' if t_.ok else 'NO '} {textwrap.shorten(t_.observation, 140)}")
+
+#%% md
+**The check nudge.** The script adds one line of code with no check, then says `done`, and says it again.
+
+#%% code
+ep, h = gate_run("ob-postcode-cache", "GATE-NUDGE", [
+    '<read path="geo.py"/>',
+    f'<edit path="geo.py">\n<old>\nimport register\n</old>\n<new>\nfrom functools import cache\n\nimport register\n</new>\n</edit>',
+    "<done>step 3: functools.cache</done>", "<done>step 3: functools.cache; the visible test is the check</done>"],
+    LeanGates(siblings=False, deps=False))                    # the read gate stays on; the script reads first
+print("[check nudge]")
+for t_ in ep.turns:
+    print(f"  {t_.n}  {t_.action:<5} {'ok ' if t_.ok else 'NO '} {textwrap.shorten(t_.observation or '(finished)', 100)}")
+print(f"  stop: {ep.stop}; the nudge fired {sum(1 for kind, _ in h.state['gates']['log'] if kind == 'check nudge')} time(s)")
+
+#%% md
+Four short scripts, four gates, every outcome exact because the agent is scripted. The read gate refused the first edit and accepted the same edit once the file had been read. The sibling scan answered the lazy fix to `orders.reserve` by naming `shipping.dispatch`, the second caller of the same shared function: the root-cause trap of `rc-stock-take`. The runtime gate refused `itertools.batched` in a project that declares Python 3.9, and the dependency gate refused `pandas` with an alternative. The nudge held back the first `done` and let the second through.
+
+#%% md
+## S50 - The critic: a review before the agent may finish
+
+**Theory.** A second pass catches what the first missed, which is why human teams review code. Our critic is a short, separate model call made when the agent first says `done` on a request. It receives the change as a diff, plus the review instructions packaged as the `lean-review` skill. It replies with numbered findings, each tagged with what kind of cut it is (`delete`, `stdlib`, `native`, `reuse`, `yagni`, `shrink`), each naming its replacement and the lines it would save, or with exactly *"Lean already. Ship."* Three details keep the critic from doing harm. Its **scope** is complexity only: correctness, security and style are explicitly out of scope, because a reviewer told to find problems will otherwise add code. It may **never flag the one runnable check or a guard**. And its findings are **flat statements**, not hedged questions ("Could the cache be simpler?" invites keeping everything; "shrink: geo.py: replace the dict cache with functools.cache (net: -5 lines)" invites a decision). The agent sees the findings once and applies the ones it agrees with. A **trim guard** then sits on every later edit and refuses any that lowers the file's count of guard signatures from Part I's S3c. The critic can suggest cutting; it cannot cut a guard.
+
+**In plain terms.** Before finishing, a reviewer lists what could go. The agent decides what to cut, and nothing that protects the program may be among it.
+
+**For teams.** The critic costs one short call per ticket. Its value is in the trim guard as much as the findings: a review step that may delete code must be prevented from deleting checks, or it becomes the most dangerous tool in the loop.
+
+**How a request ends.** The nudge asks for a check once and the critic reviews once. From then on the trim guard stands between the critic's suggestions and the file's guards: structure can go, a guard cannot.
+
+{{diagram:critic}}
+
+#%% md
+**`SKILL_TEXTS`** holds the six skills as data: `lean` itself and the five a user calls by name. For each name it gives the trigger description the model sees in the skills index, the mode, an argument hint and the body. Only two bodies are written out, `lean-review` and `lean-audit`, because those are the only skills a model runs: `lean` takes its body from the ruleset, and the other three are commands that need no model. The review body carries the three protections above: complexity is the only scope, the check and the guards are off limits, and findings are flat statements in a fixed form that ends with a net line count.
+
+#%% code
+SKILL_TEXTS = {
+    "lean": ("Use for every request that writes, changes, fixes or removes code, however small. "
+             "Do not use for questions, explanations or writing that is not code.", "persistent", "", None),
+    "lean-review": ("Use when asked to review code or a change for unnecessary complexity, and before finishing a change. "
+                    "Not for correctness, security or style reviews.", "one-shot", "[the change to review]", """
+Review the change for code it did not need. Scope: complexity only. Correctness, security and style are out of scope, and so is the one runnable check: never suggest removing it, and never suggest removing a guard (input checks, error handling that prevents data loss, security checks, accessibility).
+
+List findings as numbered lines, most valuable first, each in this form:
+N. tag: file: what to remove or replace, and with what (net: -K lines)
+Tags: delete (code nothing needs), stdlib (the standard library already does it), native (the platform does it), reuse (the project already has it), yagni (built for a need nobody has), shrink (the same behaviour in fewer lines).
+State each finding flatly, as a fact with its replacement. Do not ask questions and do not hedge.
+End with one line: net: -N lines.
+If nothing is worth removing, reply with exactly: Lean already. Ship."""),
+    "lean-audit": ("Use when asked to audit a whole project for over-engineering: unused code, needless layers, "
+                   "dependencies the standard library covers.", "one-shot", "[folder]", """
+Audit the whole project for code it does not need. Look for: packages the standard library or the platform already covers; an abstract class with one subclass; a factory that makes one thing; a settings class for values that never change; functions that only call another function; hand-written versions of standard-library functions; duplicate helpers; modules nothing imports; flags nothing turns on; retries around calls that cannot fail transiently; parameters nobody passes; thread or process pools for work that does no I/O.
+
+Before you list anything for deletion, search the whole tree for it, tests included, and remember that code can be reached by a name built at run time (getattr, importlib, a lookup table). If you find any reference, it is not dead.
+
+List findings as numbered lines, biggest cut first:
+N. tag: file: symbol: what to do (net: -K lines)
+Use the tags delete, stdlib, native, reuse, yagni, shrink. End with: net: -N lines, -M dependencies."""),
+    "lean-debt": ("Use when asked what shortcuts or deferred work the code is carrying.", "one-shot", "", None),
+    "lean-gain": ("Use when asked how much the system has helped, in measured numbers.", "one-shot", "", None),
+    "lean-help": ("Use when asked how to use the system.", "one-shot", "", None),
+}
+print(f"[skills] {len(SKILL_TEXTS)} skills: {', '.join(SKILL_TEXTS)}")
+
+#%% md
+**`write_skills(folder=SKILLS_DIR)`** turns that table into files, one `SKILL.md` per skill with the header Part III's loader expects, and then loads the folder back through the same `SkillRegistry` any user's skills go through. Writing real files and reading them back means the skills the experiments use are exactly the files a user would install, parsed by the same code. A skill with no body of its own gets a one-line note saying which command runs it.
+
+#%% code
+def write_skills(folder=SKILLS_DIR):
+    """Write each skill as a SKILL.md: the header, then the body (or a note that a command runs it)."""
+    for name, (description, mode, hint, body) in SKILL_TEXTS.items():
+        if name == "lean":
+            body = ruleset("full")                            # the main skill is the ruleset itself: one copy of the words
+        else:
+            body = body or f"Run by the /{name} command; no model is needed."   # no body of its own: a command runs it
+        (Path(folder) / name).mkdir(parents=True, exist_ok=True)   # one folder per skill, as the loader expects
+        header = f"---\nname: {name}\ndescription: {description}\nmode: {mode}\n"   # the header the loader reads
+        if hint:
+            header += f"argument-hint: {hint}\n"              # only a skill that takes an argument says what it is
+        (Path(folder) / name / "SKILL.md").write_text(header + f"---\n{body.strip()}\n", encoding="utf-8")   # close it, then the body
+    return SkillRegistry().load(folder, namespace=SYSTEM_NAME)   # read back by the host's own loader
+
+show_def(write_skills, layer="plugin")
+
+#%% code
+LEAN_SKILLS = write_skills()                                  # written to skills/ and loaded back
+for s in LEAN_SKILLS.skills.values():
+    print(f"[skill] {s.name:<12} {s.mode:<10} {tokens_of(s.body):>4} tokens  {textwrap.shorten(s.description, 84)}")
+
+#%% md
+Two regular expressions read the critic's replies. **`FINDING`** matches one numbered finding in the form the review skill asks for, `N. tag: text`, and captures the number, the tag and the rest; a line in any other shape is not a finding. **`HEDGE`** spots a hedged finding (a question mark, or words such as *consider* and *maybe*), which the measurement below counts, because a finding phrased as a question invites keeping everything.
+
+#%% code
+# "2. shrink: geo.py: ..." gives (number, tag, the rest); a tag outside the six is not a finding
+FINDING = re.compile(r"^\s*(\d+)[.)]\s*(delete|stdlib|native|reuse|yagni|shrink)\s*:\s*(.+?)\s*$", re.I)
+# a question mark, or one of the phrases that turn a finding into a suggestion
+HEDGE = re.compile(r"\?|\b(consider|maybe|perhaps|might want|could you|you may want)\b", re.I)
+print(f"[critic] {FINDING.match('2. shrink: geo.py: replace the dict cache with functools.cache (net: -5 lines)').groups()}")
+print(f"[critic] hedged: {bool(HEDGE.search('Could the cache be simpler?'))} and "
+      f"{bool(HEDGE.search('delete: geo.py: remove the unused counter (net: -3 lines)'))}")
+
+#%% md
+**`parse_findings(text)`** turns a review into a list of `(number, tag, text)` tuples, one per line that matches `FINDING`, with the tag in lower case. Everything else in the reply is ignored, the closing `net:` line included, and the verdict *Lean already. Ship.* parses as an empty list, which is how the critic's caller knows there is nothing to pass on.
+
+#%% code
+def parse_findings(text):
+    """[(number, tag, text)] from a review; [] for 'Lean already. Ship.'"""
+    found = []
+    for line in (text or "").splitlines():                    # no reply at all reads as no findings
+        m = FINDING.match(line)                               # None for a line that is not a finding
+        if m:
+            found.append((int(m.group(1)), m.group(2).lower(), m.group(3)))   # the number as an int, the tag in lower case
+    return found
+
+show_def(parse_findings, layer="plugin")
+
+#%% code
+sample_review = ("1. shrink: geo.py: replace the dict cache with functools.cache (net: -5 lines)\n"
+                 "2) delete: geo.py: remove the unused statistics counter (net: -3 lines)\n"
+                 "Could the cache be simpler?\n"
+                 "net: -8 lines")
+print(f"[critic] {parse_findings(sample_review)}")
+print(f"[critic] 'Lean already. Ship.' parses as {parse_findings('Lean already. Ship.')}")
+
+#%% md
+**`change_diff(seed, final, limit=4000)`** is what the critic is shown: a unified diff of every non-test Python file the change touched, with two lines of context, in path order. Test files are left out, since the check is off limits to the critic in any case. The text is capped at `limit` characters and marked when it is cut, so one sprawling change cannot make the review call arbitrarily large.
+
+#%% code
+def change_diff(seed, final, limit=4000):
+    """A unified diff of every non-test Python file the change touched."""
+    out = []                                                  # diff lines from every file, one file after another
+    for path in sorted(final):                                # path order, so the same change gives the same diff
+        if path.endswith(".py") and final[path] != seed.get(path) and not is_test_file(path):
+            # a new file is diffed against nothing, so every line shows as added
+            out += difflib.unified_diff(seed.get(path, "").splitlines(), final[path].splitlines(),
+                                        f"a/{path}", f"b/{path}", lineterm="", n=2)
+    text = "\n".join(out)
+    if len(text) <= limit:                                    # most changes fit whole
+        return text
+    return text[:limit] + "\n(diff truncated)"
+
+show_def(change_diff, layer="plugin")
+
+#%% code
+diff_demo_task = SUITE["ob-postcode-cache"]
+print(change_diff(diff_demo_task.seed, snapshot(WS_DIR / "ob-postcode-cache-good")))   # the good answer, as Part II laid it out
+
+#%% md
+**`review(llm, diff, replica=0)`** is the critic's one model call. The system message is the review skill's body followed by the compact copy of the rules, the user message is the diff, and the call goes to the fast model. Thinking is switched off wherever the S12 probe showed that works, because a review is a short answer that does not need it. The function returns the reply's text and nothing else; reading it is `parse_findings`' job.
+
+#%% code
+def review(llm, diff, replica=0):
+    """One critic call: the review skill, the compact rules, the diff. A review is a short
+    answer, so the model's thinking is switched off wherever the S12 probe showed that works."""
+    system = LEAN_SKILLS.skills["lean-review"].body + "\n\n" + ruleset("full", core_only=True)   # the skill, then the rules
+    extra = {}                                                # no extra parameter unless the probe allows one
+    if "thinking off" in CAN.get(MODEL_FOR["fast"], ()):
+        extra = {"enable_thinking": False}                    # only for a model whose probe passed
+    messages = [{"role": "system", "content": system},        # one system message, as the host always sends
+                {"role": "user", "content": f"The change:\n{diff}"}]
+    r = llm.chat(MODEL_FOR["fast"], messages, tag="critic", replica=replica,      # through the ledger, like every call
+                 temperature=TEMPERATURE, top_p=TOP_P, max_tokens=4000, **extra)
+    return r.text.strip()
+
+show_def(review, layer="plugin")
+
+#%% md
+**`_scripted_critic(model, messages, params)`** stands in for the critic in smoke runs. It recognises a review by the opening words of the review skill and counts the lines the diff adds: six or fewer get the exact verdict *Lean already. Ship.*, and anything larger gets two fixed findings in the required form.
+
+#%% code
+@SCRIPTED.register
+def _scripted_critic(model, messages, params):
+    if not messages[0]["content"].lstrip().startswith("Review the change"):   # not a review: another responder answers
+        return None
+    diff = messages[-1]["content"]                            # the user turn: "The change:" and the diff
+    added = sum(1 for line in diff.splitlines() if line.startswith("+") and not line.startswith("+++"))   # file headers aside
+    if added <= 6:                                            # a small change passes as it is
+        return "Lean already. Ship."
+    return ("1. shrink: the changed file: replace the hand-written cache class with functools.cache (net: -9 lines)\n"
+            "2. delete: the changed file: remove the unused statistics counter (net: -3 lines)\nnet: -12 lines")
+
+show_def(_scripted_critic)
+
+#%% md
+The critic is measured on six changes, a good and a bloated answer to each of three tasks. For each review the table counts the findings, whether it said *Lean already*, how many findings were hedged, the lines the findings claim to save, and how many propose deleting something that looks like a guard.
+
+#%% code
+rows = []
+for task_id in ("ob-postcode-cache", "sf-share-link", "ob-member-unique"):
+    t = SUITE[task_id]
+    for ref in ("good", "bloated"):
+        text = review(FRONT_DOOR, change_diff(t.seed, snapshot(WS_DIR / f"{t.id}-{ref}")))   # one critic call per answer
+        found = parse_findings(text)
+        # deletions whose text names something guard-like: what the trim guard is there for
+        guard_cuts = [f for f in found if re.search(r"\b(guard|validat|escap|check|compare_digest|constraint)", f[2], re.I)
+                      and f[1] == "delete"]
+        all_findings = "\n".join(f[2] for f in found)
+        rows.append({"task": task_id, "answer": ref, "findings": len(found),
+                     "lean already": "yes" if "Lean already" in text else "no",
+                     "hedged": sum(bool(HEDGE.search(f[2])) for f in found),                    # phrased as suggestions
+                     "claimed net": sum(int(x) for x in re.findall(r"net:\s*-(\d+)", all_findings)),   # lines they say go
+                     "touches a guard": len(guard_cuts),
+                     "first finding": textwrap.shorten(plain(found[0][2]), 70) if found else "-"})
+print(f"[critic] {len(rows)} reviews")
+
+#%% code
+table(rows, [("task", "task", ""), ("answer", "answer", ""), ("findings", "findings", "d"), ("lean already", "lean already", ""),
+             ("hedged", "hedged", "d"), ("claimed net", "net lines", "d"), ("touches a guard", "guard deletions", "d"),
+             ("first finding", "first finding", "")])
+save_exp("critic", {"rows": rows})
+
+#%% md
+**`accept_trim(task, before, after, ws)`** is the test a trim must pass, in two parts: no source file may end up with fewer guard signatures than it started with, and the project's visible test must still pass. Both are needed, and the demonstration below shows why the guard count carries the weight: deleting the signature check from the good share-link answer leaves the visible test green. The function returns its verdict with the evidence, the files that lost guards and the test result, so a refusal can say what went wrong.
+
+#%% code
+def accept_trim(task, before, after, ws):
+    """A trim is accepted only if no file lost a guard and the visible test still passes."""
+    lost = {}                                                 # file: (guards before, guards after)
+    for p, s in after.items():
+        if p.endswith(".py") and not is_test_file(p):         # source files only: a test is not a guard
+            lost[p] = (sum(guard_signatures(before.get(p, "")).values()), sum(guard_signatures(s).values()))
+    lost = {p: v for p, v in lost.items() if v[1] < v[0]}      # keep only the files whose count went down
+    visible = run_fenced(ws, ["tests_visible.py"], timeout=60).returncode == 0   # the project's own test, fenced
+    return (not lost and visible), lost, visible              # the verdict, then the evidence for it
+
+show_def(accept_trim, layer="plugin")
+
+#%% md
+The trim to test: the good share-link answer with its constant-time signature check deleted.
+
+#%% code
+t = SUITE["sf-share-link"]
+ws = materialise(t, WS_DIR / "trim-demo", "good")
+before = snapshot(ws)
+# the two lines that turn away a forged signature
+trimmed = before["sharing/links.py"].replace("    if not hmac.compare_digest(signature, _sign(f\"{doc_id}.{expires_at}\", secret)):\n        return None\n", "")
+(ws / "sharing" / "links.py").write_text(trimmed, encoding="utf-8")
+print(f"[trim] links.py: {len(before['sharing/links.py'].splitlines())} lines before the trim, {len(trimmed.splitlines())} after")
+
+#%% code
+ok, lost, visible = accept_trim(t, before, snapshot(ws), ws)
+print(f"[trim] deleting the signature check from the good share-link answer: accepted={ok}, guards lost={lost}, "
+      f"visible test {'passed' if visible else 'failed'}")
+print(f"  the visible test still passes, which is exactly why the guard count is the second condition; the hidden "
+      f"test agrees: {score(t, ws, visible=False).short()}")
+
+#%% md
+**`LeanCritic`** puts the review inside the agent's loop and then stands guard. Its one switch is the trim guard, which an ablation can turn off to see what the critic does without it (the third exercise at the end of this Part). Like the gates, it keeps its state on the host, under `critic`: whether this request has been reviewed, the findings, and the snapshot the review diffs against.
+
+#%% code
+class LeanCritic:
+    """The critic inside the loop: on the first done of each request, review what the request
+    changed; afterwards, refuse any edit that lowers a file's guard count."""
+
+    def __init__(self, trim_guard=True):
+        self.trim_guard = trim_guard                          # off only for an ablation: nothing then stops a trim cutting a guard
+
+show_def(LeanCritic, layer="plugin")
+
+#%% md
+**`LeanCritic.install(host)`** registers three hooks. The one on `pre_tool` gets the same deadline as a model call instead of the bus's default of 50 milliseconds, because on the first `done` it waits for the review. With the default, any review that took longer than the bus's five-second hang limit would be abandoned and its findings lost.
+
+#%% code
+@method_of(LeanCritic)
+def install(self, host):
+    host.bus.on("session_start", self.on_session_start, name="critic.session", priority=40)
+    host.bus.on("user_prompt", self.on_user_prompt, name="critic.request", priority=40)
+    # the review is a model call, so this hook gets a model call's deadline
+    host.bus.on("pre_tool", self.on_pre_tool, name="critic.review", priority=40, budget_ms=CALL_DEADLINE_S["default"] * 1000)
+
+show_def(LeanCritic.install, layer="plugin")
+
+#%% md
+**`LeanCritic.on_session_start(host, source)`** creates the critic's state on a fresh start or after `/clear`, including the workspace snapshot that the review diffs against. Unlike the gates' hook it returns nothing, since the critic adds no text to the system message, and a compaction leaves its state as it was.
+
+#%% code
+@method_of(LeanCritic)
+def on_session_start(self, host, source, **_):
+    if source in ("startup", "clear") or "critic" not in host.state:
+        # reviewed: this request's one review has happened; seed: what the review diffs against
+        host.state["critic"] = {"reviewed": False, "findings": [], "seed": snapshot(host.ws)}
+
+show_def(LeanCritic.on_session_start, layer="plugin")
+
+#%% md
+**`LeanCritic.on_user_prompt(host)`** gives every new request its own review by resetting that state, baseline included. Without it, only the first ticket of a session would be reviewed, because the flag that marks the review as done would stay set until the session was cleared.
+
+#%% code
+@method_of(LeanCritic)
+def on_user_prompt(self, host, **_):
+    if "critic" in host.state:                # a new request gets its own review
+        host.state["critic"] = {"reviewed": False, "findings": [], "seed": snapshot(host.ws)}
+
+show_def(LeanCritic.on_user_prompt, layer="plugin")
+
+#%% md
+**`LeanCritic.on_pre_tool(host, action, ws)`** does the critic's two jobs. On the first `done` of a request it diffs the workspace against the request's baseline, sends the diff to `review`, and if there are findings, holds the finish back once with up to six of them and the instruction to apply the ones the agent agrees with; a request that changed no Python source is not reviewed at all. From then on the trim guard is armed: any edit that replaces text and would lower the file's count of guard signatures is refused, whatever the review said.
+
+#%% code
+@method_of(LeanCritic)
+def on_pre_tool(self, host, action, ws, **_):
+    st = host.state["critic"]                                 # this request's review state
+    # the trim guard, armed once the review has happened
+    if action.name == "edit" and st["reviewed"] and self.trim_guard:
+        try:
+            full = resolve_in(ws, action.args.get("path", ""))   # the host's path guard
+        except ToolError:                                     # the path guard explains this one
+            return None
+        before = full.read_text(encoding="utf-8-sig") if full.is_file() else ""   # a new file starts empty
+        old, new = action.args.get("old", ""), action.args.get("new", "")
+        after = before.replace(old, new, 1) if old else ""    # the file as the edit would leave it
+        # only a replacement can remove a guard: fewer signatures after it than before means one went
+        if old and sum(guard_signatures(after).values()) < sum(guard_signatures(before).values()):
+            return {"deny": "that edit removes a guard; the review may cut structure, never input checks, "
+                            "error handling, security or accessibility"}
+    # the review, once per request, on the first done
+    if action.name == "done" and not st["reviewed"]:
+        st["reviewed"] = True                                 # set first, so a failed or abandoned review is not retried
+        diff = change_diff(st["seed"], snapshot(ws))          # everything this request changed
+        if not diff:                                          # nothing changed, nothing to review
+            return None
+        reply = review(host.llm, diff, host.replica)          # the one model call the critic makes
+        found = parse_findings(reply)                         # [] for "Lean already. Ship."
+        st["findings"] = found                                # kept on the host for the trace
+        if found:
+            listing = "\n".join(f"{n}. {tag}: {text}" for n, tag, text in found[:6])   # at most six, numbered as the critic numbered them
+            return {"deny": f"a review of your change suggests:\n{listing}\nApply the ones you agree with, then "
+                            "finish. Never remove a guard or the check."}
+    return None
+
+show_def(LeanCritic.on_pre_tool, layer="plugin")
+
+#%% md
+The trim guard can be tried without a model: mark the review as done, then offer two deletions from the good share-link answer, one of the signature check and one of a docstring.
+
+#%% code
+critic_demo_ws = materialise(SUITE["sf-share-link"], RUNTIME / "demo" / "critic", "good")
+critic_demo_host = Host(label="critic-demo")                  # a bare host; the review itself is never called here
+critic_demo_host.start_session(critic_demo_ws)
+demo_critic = LeanCritic()
+demo_critic.on_session_start(critic_demo_host, "startup")
+critic_demo_host.state["critic"]["reviewed"] = True           # as if the first done had been reviewed: the guard is armed
+guard_cut = Action("edit", {"path": "sharing/links.py", "new": "",
+                            "old": "    if not hmac.compare_digest(signature, _sign(f\"{doc_id}.{expires_at}\", secret)):\n"
+                                   "        return None\n"})
+docstring_cut = Action("edit", {"path": "sharing/links.py", "new": "",
+                                "old": '    """Return the document id this token grants access to, or None if it is not valid."""\n'})
+print(f"[critic] cutting the signature check: {demo_critic.on_pre_tool(critic_demo_host, guard_cut, critic_demo_ws)}")
+print(f"[critic] cutting a docstring: {demo_critic.on_pre_tool(critic_demo_host, docstring_cut, critic_demo_ws)}")
+
+#%% md
+## S51 - Choosing which findings to apply
+
+**Theory.** A review that can only be accepted or rejected as a whole is a review people stop reading. Every finding is numbered so that a user (or the agent) can apply any subset: "fix 2 and 5" is the whole instruction. The widget below shows the critic's findings on the bloated postcode answer as checkboxes, and builds the instruction the agent would receive. The static print above it shows the same findings for readers whose viewer cannot run widgets. Whatever subset is chosen, the trim guard from S50 still stands between the instruction and the code.
+
+**In plain terms.** Every suggestion has a number, and you pick the ones you want.
+
+#%% code
+t = SUITE["ob-postcode-cache"]
+review_text = review(FRONT_DOOR, change_diff(t.seed, snapshot(WS_DIR / f"{t.id}-bloated")))   # the critic on the bloated answer
+FOUND = parse_findings(review_text)
+print("[review] the critic on the bloated postcode answer:")
+for n, tag, text in FOUND:
+    print(f"  {n}. {tag}: {textwrap.shorten(plain(text), 110)}")
+first_two = " and ".join(str(n) for n, _, _ in FOUND[:2])     # what a user would type to apply the first two
+print(f"  ({len(FOUND)} findings; to apply some, the user types e.g. 'fix {first_two}')")
+
+#%% md
+The same findings as checkboxes. Ticking or unticking one rebuilds the instruction the agent would receive.
+
+#%% code
+W = widgets()                                                 # None in a headless run
+if W:
+    from IPython.display import display
+    # one box per finding; the first two start ticked, as in the example above
+    boxes = [W.Checkbox(value=i < 2, description=f"{n}. {tag}", indent=False) for i, (n, tag, _) in enumerate(FOUND)]
+    instruction = W.Textarea(layout={"width": "100%", "height": "70px"})
+
+    def _instruction(change=None):
+        chosen = [str(n) for b, (n, _, _) in zip(boxes, FOUND) if b.value]   # the numbers of the ticked boxes
+        if chosen:
+            instruction.value = f"Apply review findings {' and '.join(chosen)} to this project. Never remove a guard."
+        else:
+            instruction.value = "(no findings chosen: nothing to apply)"
+
+    for b in boxes:
+        b.observe(_instruction, names="value")                # any change to a box rebuilds the text
+    _instruction()                                            # once now, for the starting ticks
+    display(W.VBox(boxes + [instruction]))
+else:
+    print("(no widget in this run, which needs a live Jupyter session; the list above is the whole story)")
+
+#%% md
+## S52 - The audit, against a project with planted bloat
+
+**Theory.** Reviewing one change is local; auditing a whole project is where over-engineering that has already shipped gets found. The `lean-audit` skill hunts for twelve kinds of bloat and ranks what it finds by the size of the cut. Measuring an audit needs ground truth, so the notebook carries a small invoicing project with **twelve known pieces of bloat**: an interface with one implementation, a factory with one product, a settings class for constants, a hand-written rounding function, a forwarding wrapper, `python-dateutil` for ISO dates, a duplicate helper, a dead module, a dead flag with its dead branch, a retry around a list append, an unused parameter and a thread pool for string formatting. It also carries **five decoys**, functions that look dead to a quick search but are used: two reached through `getattr` with a name built at run time, one loaded by `importlib` from a module name, one called through a lookup table, and one used only by the tests. The audit's findings are matched against the truth: **recall** is the share of the twelve it found, **precision** the share of its findings that are real, and a **false delete** is a finding that proposes deleting a decoy.
+
+Then comes the safety net the audit skill itself asks for: *search before you delete*. `verify_delete` searches the whole tree, tests included, for any reference to a symbol outside its own definition. That catches three of the decoys. It cannot catch the fourth kind, a name assembled at run time (`f"to_{fmt}"`), because there is nothing to search for. So the second layer runs the project's tests on a copy with the symbol deleted, and only a delete that survives both is accepted.
+
+**In plain terms.** We planted twelve bits of bloat and five traps in a small project, ask the audit to find the bloat, and check that nothing it wants deleted is secretly in use.
+
+#%% md
+The planted project and its answer key live in `fixtures/`. **`AUDIT_TRUTH`** lists the twelve pieces of bloat, each with its file, the symbol that identifies it and the fix, and the five decoys with the way each one is reached.
+
+#%% code
+AUDIT_DIR = ROOT / "fixtures" / "audit_project"                # the invoicing project with the bloat planted in it
+AUDIT_TRUTH = json.loads((ROOT / "fixtures" / "audit_truth.json").read_text(encoding="utf-8"))   # its answer key
+print(f"[audit] {rel(AUDIT_DIR)}: {len(AUDIT_TRUTH['bloat'])} pieces of planted bloat, {len(AUDIT_TRUTH['decoys'])} decoys")
+for audit_item in AUDIT_TRUTH["bloat"]:
+    print(f"  {audit_item['id']:>2}. {audit_item['symbol']:<20} {audit_item['kind']}")
+
+#%% md
+**`audit_findings_to_truth(found)`** scores an audit against the key by the symbols its findings name, matched as whole words. A finding that names a planted symbol is a hit, and two findings on the same piece count once. A finding that proposes *deleting* a decoy is a false delete, and one that names nothing in the key at all is unmatched, which counts against precision. The audit may describe a problem however it likes, but it has to point at the right code.
+
+#%% code
+def audit_findings_to_truth(found):
+    """Match findings to the planted bloat and the decoys by the symbols they name."""
+    hits, decoys, unmatched = set(), [], []                   # bloat ids found, decoys proposed for deletion, misses
+    for n, tag, text in found:
+        # the planted pieces and the decoys this finding names
+        bloat = [b["id"] for b in AUDIT_TRUTH["bloat"] if re.search(rf"\b{re.escape(b['symbol'])}\b", text)]
+        decoy = [d["symbol"] for d in AUDIT_TRUTH["decoys"] if re.search(rf"\b{re.escape(d['symbol'])}\b", text)]
+        hits.update(bloat)                                    # a set of ids: one piece found twice counts once
+        if decoy and tag == "delete":
+            decoys.append((n, decoy[0]))                      # only a proposed deletion of a decoy is a false delete
+        if not bloat and not decoy:
+            unmatched.append(n)                               # names nothing in the key
+    return hits, decoys, unmatched
+
+show_def(audit_findings_to_truth, layer="plugin")
+
+#%% code
+example_findings = parse_findings("1. delete: invoicing/legacy_csv.py: export_legacy: nothing imports it (net: -8 lines)\n"
+                                  "2. delete: invoicing/exporters.py: to_json: never called (net: -2 lines)\n"
+                                  "3. shrink: app.py: tidy the start-up code (net: -3 lines)")
+print(f"[audit] hits, false deletes, unmatched: {audit_findings_to_truth(example_findings)}")
+
+#%% md
+**`verify_delete(project, symbol)`** is the safety net for a proposed deletion, in two layers. The first is a whole-word search of every Python file, tests included, for the symbol anywhere except its own `def` or `class` line; any hit means it is still in use. The second runs only when the search finds nothing: a copy of the project is written with the definition cut out, and the project's tests run on the copy inside the fence. A delete is allowed only when both layers agree, and the reason says which layer decided.
+
+#%% code
+def verify_delete(project, symbol):
+    """(safe, reason). Layer 1: no reference to the symbol outside its definition anywhere in the
+    tree, tests included. Layer 2: the tests still pass on a copy with the definition removed."""
+    files = snapshot(project)                                 # every text file, tests included
+    refs = []                                                 # file:line of every mention
+    for p, s in files.items():
+        if not p.endswith(".py"):
+            continue
+        for i, line in enumerate(s.splitlines(), 1):
+            mentions = re.search(rf"\b{re.escape(symbol)}\b", line)                    # the name, as a whole word
+            defines = re.match(rf"\s*(def|class)\s+{re.escape(symbol)}\b", line)       # its own def or class line
+            if mentions and not defines:
+                refs.append(f"{p}:{i}")
+    if refs:
+        return False, f"still referenced at {', '.join(refs[:2])}"   # layer 1 is enough to say no
+    # layer 2: a copy of the project with the definition cut out
+    scratch = write_files(files, RUNTIME / "audit-verify" / symbol)
+    for p, s in files.items():
+        tree = _safe_parse(s) if p.endswith(".py") else None
+        if tree is None:
+            continue
+        for node in tree.body:                                # only a top-level def or class is cut
+            if isinstance(node, (ast.FunctionDef, ast.ClassDef)) and node.name == symbol:
+                lines = s.splitlines()
+                del lines[node.lineno - 1:node.end_lineno]    # from its def line to its last line
+                (scratch / p).write_text("\n".join(lines) + "\n", encoding="utf-8")   # the copy, without it
+    tests = run_fenced(scratch, ["-m", "tests.test_invoicing"], timeout=60)   # the project's own tests, fenced
+    passed = tests.returncode == 0
+    return (passed, "the tests pass without it" if passed else "the tests fail without it")
+
+show_def(verify_delete, layer="plugin")
+
+#%% md
+Each decoy goes through the net, and so does one symbol that really is dead, as a control that a true delete still gets through.
+
+#%% code
+rows = []
+for d in AUDIT_TRUTH["decoys"] + [{"symbol": "parse_issue_date", "why": "truly dead: a duplicate nothing calls"}]:
+    safe, why = verify_delete(AUDIT_DIR, d["symbol"])
+    rows.append({"symbol": d["symbol"], "how it is reached": d["why"][:58],
+                 "delete allowed": "yes" if safe else "no", "because": why})
+table(rows, [("symbol", "symbol", ""), ("how it is reached", "how it is reached", ""), ("delete allowed", "delete allowed", ""),
+             ("because", "because", "")])
+
+#%% code
+VERIFY = {r["symbol"]: r["delete allowed"] == "yes" for r in rows}   # symbol: was the delete allowed
+results = []
+expect("a search catches the decoys named somewhere in the tree", not any(VERIFY[s] for s in ("on_issue", "shout", "is_balanced")))
+expect("the tests catch the run-time name the tests exercise (to_csv)", not VERIFY["to_csv"])
+expect("the truly dead duplicate may go", VERIFY["parse_issue_date"])
+missed_decoys = [s for s, ok in VERIFY.items() if ok and s != 'parse_issue_date']   # allowed, yet not dead
+print(f"\n  not caught by either layer: {missed_decoys or 'none'}: reached by a name built at run time, on a path no test covers")
+
+#%% md
+**`_scripted_auditor(model, messages, params)`** answers the audit in smoke runs. It replies only to the first turn of a request that carries the audit instruction, with three findings chosen to exercise the scoring: two real pieces of bloat and a proposed deletion of the `to_csv` decoy.
+
+#%% code
+@SCRIPTED.register
+def _scripted_auditor(model, messages, params):
+    last = messages[-1]                                       # the newest message in the conversation
+    is_audit_request = "Audit the whole project" in last["content"] and last["role"] == "user"
+    if not is_audit_request or len(messages) > 2:             # only the opening turn of an audit gets this answer
+        return None
+    return ("<done>1. delete: invoicing/legacy_csv.py: export_legacy: nothing imports this module (net: -8 lines)\n"
+            "2. yagni: invoicing/store.py: StoreFactory: one product (net: -7 lines)\n"
+            "3. delete: invoicing/exporters.py: to_csv: never called (net: -2 lines)\n"
+            "net: -17 lines, -0 dependencies</done>")
+
+show_def(_scripted_auditor)
+
+#%% md
+The audit itself runs as a read-only helper on a copy of the project, with the coder model and thirty turns, so it can read the whole project before it answers.
+
+#%% code
+audit_ws = write_files(snapshot(AUDIT_DIR), RUNTIME / "audit-run")   # a copy, so the fixture is never touched
+h = Host(label="audit")                                       # no plugins: the audit skill is the whole instruction
+h.start_session(audit_ws)
+res, _ = h.subagent("auditor", LEAN_SKILLS.skills["lean-audit"].body.strip() + "\n\nAudit the whole project.", audit_ws,
+                    max_turns=30, model=MODEL_FOR["coder"])
+AUDIT_FOUND = parse_findings(res.done_text)
+print(f"[audit] {len(res.turns)} turns, stop: {res.stop}; {len(AUDIT_FOUND)} findings")
+for n, tag, text in AUDIT_FOUND:
+    print(f"  {n}. {tag}: {textwrap.shorten(plain(text), 108)}")
+
+#%% md
+Scored against the key, with every proposed deletion of a decoy put through the two-layer check:
+
+#%% code
+hits, decoy_deletes, unmatched = audit_findings_to_truth(AUDIT_FOUND)
+verified = [(n, sym) for n, sym in decoy_deletes if verify_delete(AUDIT_DIR, sym)[0]]   # false deletes the net would let through
+recall = len(hits) / len(AUDIT_TRUTH["bloat"])                # the share of the twelve planted pieces found
+precision = 0.0                                               # no findings at all scores nothing
+if AUDIT_FOUND:
+    # a finding is real unless it names nothing in the key or proposes deleting a decoy
+    precision = (len(AUDIT_FOUND) - len(unmatched) - len(decoy_deletes)) / len(AUDIT_FOUND)
+print(f"[audit] recall {recall:.0%} ({len(hits)} of {len(AUDIT_TRUTH['bloat'])} planted items), precision {precision:.0%}")
+print(f"  proposed deletions of decoys: {len(decoy_deletes)} {decoy_deletes or ''}; after verification: {len(verified)}")
+save_exp("audit", {"findings": len(AUDIT_FOUND), "found": len(hits), "planted": len(AUDIT_TRUTH["bloat"]),
+                   "recall": recall, "precision": precision, "decoy_deletes": len(decoy_deletes),
+                   "decoy_deletes_verified": len(verified), "turns": len(res.turns)})
+
+#%% md
+## S53 to S55 - Debt, gain and help
+
+**Theory.** Three skills need no model at all, so they run as commands and cost no tokens. **Debt** (`/lean-debt`) collects every shortcut marker in the code and every `left out:` line in the agent's answers into one ledger, and flags any entry without a condition for revisiting it. A deferral without a trigger is how "later" quietly becomes "never", and the flag exists to stop that. **Gain** (`/lean-gain`) reports what the lab has measured, and only that: it reads the experiment records and refuses to promise anything about a particular repository, because the defensible claim is "on this suite, with these models", not "on your code". **Help** (`/lean-help`) is generated from the command table and the skill registry, so it cannot describe a command that does not exist or miss one that does; a parity test checks both directions.
+
+**In plain terms.** Three commands that only read: what corners were cut, what the measurements say, and how to use the system.
+
+#%% md
+**`debt_ledger(workspaces, answers)`** gathers deferred work from both places it is written down. In the code it collects every shortcut marker with Part IV's `find_markers`; in the agents' final answers, every line that starts with `left out`, read with the `LEFT_OUT` pattern from the output contract. Each entry is flagged under `no trigger` when it has no condition for coming back to it: a marker without its *upgrade when* part, or a `left out:` line without *build it when*.
+
+#%% code
+def debt_ledger(workspaces, answers):
+    """Every shortcut marker in the code and every 'left out' line in the answers, with a flag
+    for entries that have no condition for coming back to them."""
+    rows = []                                                 # one row per piece of deferred work
+    for ws in workspaces:
+        py_files = {p: s for p, s in snapshot(ws).items() if p.endswith(".py")}   # markers live in Python files
+        for m in find_markers(py_files):                      # well formed or not
+            rows.append({"where": f"{Path(ws).name}/{m['file']}:{m['line']}", "kind": "shortcut",
+                         "what": m["limit"] or "(unreadable marker)", "when": m["when"] or "-",
+                         "no trigger": "YES" if not m["when"] else ""})        # a marker with no 'upgrade when'
+    for label, text in answers:
+        for line in (text or "").splitlines():                # an episode with no answer has no lines
+            if not line.strip().lower().startswith("left out"):   # only deferral lines, in any case
+                continue
+            m = LEFT_OUT.match(line)                          # None when the line has no "(build it when ...)"
+            if m:
+                what, when, no_trigger = m.group(1), m.group(2), ""
+            else:
+                what, when, no_trigger = line.strip(), "-", "YES"
+            rows.append({"where": label, "kind": "left out", "what": what[:46], "when": when, "no trigger": no_trigger})
+    return rows
+
+show_def(debt_ledger, layer="plugin")
+
+#%% md
+The ledger over every episode Part IV ran, plus one made-up answer so that both kinds of `left out:` line appear:
+
+#%% code
+part4_workspaces = [EPISODES_DIR / ep.arm / f"{ep.task}-r0" for ep in PART4_EPISODES]   # where each episode worked
+part4_answers = [(f"{ep.arm}:{ep.task}", ep.done_text) for ep in PART4_EPISODES]       # and what it said at the end
+ledger_rows = debt_ledger(part4_workspaces, part4_answers)
+demo_rows = debt_ledger([], [("example", "step 3: functools.cache\nleft out: cache clearing (build it when the register "
+                                         "changes)\nleft out: eviction, maybe later")])
+table((ledger_rows + demo_rows)[:12], [("where", "where", ""), ("kind", "kind", ""), ("what", "what", ""), ("when", "come back when", ""),
+                                      ("no trigger", "no trigger", "")])
+
+#%% md
+**`gain_report()`** is the honest version of a usage report. It reads the experiment records and repeats only what they contain: the baseline's pass count and median code ratio, and the full system's headline from Part VII once that exists, or a plain statement that it does not yet. The last line states the boundary of the claim, because a number measured on this notebook's tasks and models promises nothing about someone else's repository.
+
+#%% code
+def gain_report():
+    """Only what has been measured, with the boundary of the claim stated."""
+    base = load_exp("baseline") or {}                         # {} before the baseline exists: counts print as '?', the ratio as nan
+    main = load_exp("main")                                   # None until Part VII has run
+    # the baseline, exactly as its record states it
+    lines = [f"baseline (no plugin, one run per task): {base.get('passed', '?')}/{base.get('episodes', '?')} tasks passed, "
+             f"a median {base.get('median_ratio') or float('nan'):.1f}x the code the tasks needed"]
+    if main and "summary" in main:
+        lines.append(f"full system vs baseline: {main['summary']}")   # Part VII's headline, once it has run
+    else:
+        lines.append("full system vs baseline: not measured yet in this run (Part VII)")
+    # the boundary of the claim, always the last line
+    lines.append("These numbers are from this notebook's 34 tasks and the models named in S0. "
+                 "They are not a prediction for your repository.")
+    return "\n".join(lines)
+
+show_def(gain_report, layer="plugin")
+
+#%% code
+print("[gain]\n" + textwrap.indent(gain_report(), "  "))
+
+#%% md
+**`help_card(host)`** builds the help text from the host's command table and skill registry instead of from a hand-written list, so it cannot drift: every command and skill that exists is listed, and nothing that does not exist can be. S56 checks both directions.
+
+#%% code
+def help_card(host):
+    lines = [f"/{name}: {text}" for name, (_, text) in sorted(host.commands.table.items())]   # commands, by name
+    lines += [f"/{s.name}: {s.description}" for s in sorted(host.skills.skills.values(), key=lambda s: s.name)]   # then skills
+    return "\n".join(lines)
+
+show_def(help_card, layer="plugin")
+
+#%% code
+print(textwrap.indent(help_card(Host(label="help-demo")), "  "))   # a bare host: only the host's own three commands
+
+#%% md
+## S56 - The assembled system, one complete trace
+
+**Theory.** Here everything runs together for the first time: the rules delivered by hooks (Part V), the map and the gates, the critic with its trim guard, and the skills registered on the host. The trace below prints how often each hook ran and its slowest call, every turn with what the agent did and whether a gate refused it, each time a gate fired, the critic's findings, and the score. It is one episode on one dev task, chosen because it exercises the gates, and it is the shape of every episode of the `full` arm in Part VII.
+
+**In plain terms.** The whole system, start to finish, on one ticket, with nothing hidden.
+
+#%% md
+**`LeanSkills`** is the last plugin and the smallest. It puts the two skills a model runs, `lean-review` and `lean-audit`, into the host's registry, so they appear in the skills index, and registers the three model-free skills as commands: `/lean-debt` over the current workspace, `/lean-gain` and `/lean-help`. The host answers commands itself, so these three never cost a token.
+
+#%% code
+class LeanSkills:
+    """Registers the skills and the read-only commands on the host."""
+
+    def install(self, host):
+        for name in ("lean-review", "lean-audit"):              # the rest are commands, or the /lean command itself
+            host.skills.skills[name] = LEAN_SKILLS.skills[name]
+
+        def debt_command(host, _args):                        # a command gets (host, args); this one takes no arguments
+            # one line per shortcut marker in this workspace's code
+            entries = [f"{r['where']}: {r['what']} (come back when {r['when']})" for r in debt_ledger([host.ws], [])]
+            return "\n".join(entries) or "no debt recorded"
+
+        host.commands.register(f"{CMD}-debt", debt_command, "list shortcuts and deferred work")
+        host.commands.register(f"{CMD}-gain", lambda host, args: gain_report(), "what the lab has measured")   # from the records
+        host.commands.register(f"{CMD}-help", lambda host, args: help_card(host), "this card")   # from the tables, so it cannot drift
+
+show_def(LeanSkills, layer="plugin")
+
+#%% md
+**`full_system(level="full", **off)`** assembles the full arm: the rules plugin from Part V, the gates, the critic and the skills, in that order. Every piece is on by default, and each keyword names a piece to switch off, so `full_system(critic=True)` is the full system without its critic. That one convention is what Part VII's ablations of the machinery rest on: each is this function called with one name.
+
+#%% code
+def full_system(level="full", **off):
+    """Every plugin of the full arm. Part VII's ablations switch single pieces off by name."""
+    # each keyword names a piece to switch off, so the default is everything on
+    rules = LeanPlugin(level=level, header=not off.get("header"), reinject_on_compact=not off.get("reinject"),
+                       subagents=not off.get("subagent_rules"))
+    gates = LeanGates(project_map=not off.get("map"), read_gate=not off.get("read_gate"), siblings=not off.get("siblings"),
+                      deps=not off.get("deps"), check_nudge=not off.get("nudge"))
+    plugins = [rules, gates]                                  # the order the full arm installs them in
+    if not off.get("critic"):                                 # without its critic, the arm has no critic object at all
+        plugins.append(LeanCritic())
+    plugins.append(LeanSkills())                              # the skills are never switched off
+    return plugins
+
+show_def(full_system, layer="plugin")
+
+#%% md
+Built with every plugin, the host's help card must name exactly the commands and skills that exist. The check compares the two sets in both directions.
+
+#%% code
+h = Host(plugins=full_system(), label="full")
+results = []
+cmds = {n for n in h.commands.table} | {s for s in h.skills.skills}                     # what exists
+card_names = {re.match(r"/([\w-]+)", l).group(1) for l in help_card(h).splitlines()}  # what the card says exists
+expect("the help card names every command and skill, and nothing else", card_names == cmds)
+print(textwrap.indent(help_card(h), "  "))
+
+#%% md
+One episode of `rc-day-parse` under the full system. First, how the hooks saw it: how often each one ran, and its slowest call.
+
+#%% code
+t = SUITE["rc-day-parse"]                                     # a dev task that exercises the gates
+h = Host(plugins=full_system(), label="full")                 # the full arm, as Part VII runs it
+ep = run_episode(t, h)                                        # one episode, start to finish
+print(f"[trace] {t.id} under the full system\n")
+print("  hook calls:")
+hook_rows = Counter(x["hook"] for x in h.bus.trace)           # calls per hook
+slowest = {x["hook"]: 0.0 for x in h.bus.trace}               # every hook starts at zero
+for x in h.bus.trace:
+    slowest[x["hook"]] = max(slowest[x["hook"]], x["ms"])     # the longest single call of each hook
+for hook, n in sorted(hook_rows.items()):
+    print(f"    {hook:<16} {n:>3} calls, slowest {slowest[hook]:8.1f} ms")
+print()
+
+#%% md
+Then the turns, every time a gate fired, and the critic's findings:
+
+#%% code
+show_episode(ep)                                              # every turn, a refused one marked DENIED
+for kind, where in h.state["gates"]["log"]:                   # each time a gate fired, and on which file
+    print(f"  gate: {kind} {where}")
+print(f"  critic findings: {h.state.get('critic', {}).get('findings') or 'none'}")
+
+#%% md
+And the score, the statusline, and the record Part VII compares with:
+
+#%% code
+s = score(t, ep.ws)                                           # the hidden test and the meter, fenced
+print(f"\n  scored: {s.short()}, {s.added_code} code lines added (the good answer adds {MATRIX[(t.id, 'good')].added_code}), "
+      f"guards {s.guards}, check lines {s.added_check + s.added_test}")
+print(f"  statusline: {h.status()}")
+# the trace's headline numbers, saved with the other records
+FULL_TRACE = {"task": t.id, "turns": len(ep.turns), "passed": s.passed, "added": s.added_code,
+              "denied": sum(bool(x.denied) for x in ep.turns), "gates": [k for k, _ in h.state["gates"]["log"]]}
+save_exp("full_trace", FULL_TRACE)
+
+#%% md
+**Part VI recap.** The system now has machinery as well as words: a map that shows what already exists, a read gate, a sibling scan that points at the shared helper, a gate on undeclared packages and on Python features the project cannot run, a one-time nudge for a check, and a critic whose findings can be applied selectively but can never take a guard with them. The audit was measured against planted ground truth, and the two-layer delete check showed why searching alone is not enough when code is reached by names built at run time. Debt, gain and help cost no tokens. The full arm of Part VII is the sum of Parts IV, V and VI, and every piece of it is about to be switched off in turn to see whether it was worth having.
+
+**Try it yourself.**
+1. Add `"tomli"` to `MODULE_HINTS` with the hint `tomllib (Python 3.11+)`, then work out what the runtime gate should say if a project declaring Python 3.9 imports `tomllib`.
+2. Write a decoy that defeats both layers of `verify_delete`: a function that is used, but that neither a search nor the project's tests would notice was gone. What does that tell you about deleting code with no tests?
+3. Turn the critic's trim guard off with `LeanCritic(trim_guard=False)` and run S56 again. Did the agent's trim change? (One run proves little; Part VII's ablation is the real answer.)

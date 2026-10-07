@@ -1,0 +1,15 @@
+{
+  "id": "eg-target-runtime",
+  "title": "Send text messages in groups",
+  "category": "edge",
+  "split": "held-out",
+  "axis": "quality",
+  "rung": 7,
+  "entry": "notify/sms.py",
+  "protected": ["notify/gateway.py"],
+  "requirements": [],
+  "python_target": "3.9",
+  "prompt": "The SMS gateway now rejects requests with more than 50 phone numbers. Change `send_all()` in notify/sms.py to send the numbers in groups of at most 50.",
+  "notes": "pyproject.toml declares requires-python >= 3.9 (the depots' Raspberry Pis), so itertools.batched (3.12) and other newer features would crash in production even though they pass on a 3.12 test machine. A range() loop over slices, three lines. The lazy-wrong version uses itertools.batched.",
+  "extension": "Numbers arrive with spaces and dashes ('07700 900-123'); strip those before sending."
+}

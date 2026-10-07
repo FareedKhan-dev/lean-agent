@@ -1,0 +1,1212 @@
+#%% md
+# Part VIII - Honest evaluation: could any of this be wrong?
+
+Part VII measured; this Part tries to break the measurements.
+
+**Where this sits.** Every number in Part VII came out of an instrument we built: a meter that counts lines, hidden tests we wrote, a fence, a scorer, a ledger, a runner, a statistics layer. Any of them can be wrong in a way that still produces tidy, plausible numbers, and the more plausible the numbers, the less anyone looks. So this Part does the looking. It adds the one instrument the notebook has avoided so far, a model that reads the code and judges it, and validates that judge before trusting a word it says. Then it runs every instrument check we could think of, shows how much the headline depends on how it is aggregated and on what is counted, collects the negative results in one place, compares the tasks we tuned on with the ones we did not, lists the bugs that produced reassuring wrong answers while this was being built, and ends with a claims table that a sceptical reader can check line by line.
+
+**By the end of this Part you can** validate an LLM judge before using it (known-answer pairs, agreement between judges, test-retest, a wrong-ticket control), blind what a judge sees, list the instrument checks an agent benchmark needs, see how much a headline depends on its aggregation, tell a saving in prose from a saving in code, and write a claims table in which every claim points at its evidence.
+
+{{diagram:part8_map}}
+
+#%% md
+## S78 - Judges that must earn their votes
+
+**Theory.** The meter counts lines; it cannot say which lines were needed. A **judge** is a model asked to read the change beside the ticket and say which added lines the ticket did not need. Judges are cheap and fluent, and their failure modes are well documented: they prefer longer answers, they prefer text that sounds like their own, they are swayed by comments explaining how careful the code is, and they say anything with the same confidence. The design answers each of these.
+- **Blinding.** The judge sees the ticket and a diff rebuilt from the syntax tree. Comments, docstrings, formatting and the agent's final message are all gone, and with them every hint of which arm wrote the code. The self-check block is cut as well: the rules asked for it, and a judge should not punish an arm for obeying them.
+- **A published rubric** with anchored scores from 0 to 3, and an explicit statement that guards at trust boundaries are needed lines.
+- **Citations.** Every line the judge calls unneeded must be copied from the diff. A verdict whose bloat score has no citation that appears in the diff is refused, not repaired.
+- **Determinism.** Temperature 0, thinking off and JSON output, wherever the S12 probe showed each one works.
+- **Two judges**, from a different model generation than the coder.
+- **Validation before use.** On the known-answer pairs (each task's good and bloated reference), the judges must rank the bloated answer above the good one on at least 90% of tasks. They must also agree with each other with a weighted kappa of at least 0.6 (H9). If they fail, their verdicts are printed and nothing is built on them.
+
+**In plain terms.** Two other models read each change and say which lines were not needed. First we test them on answers where we already know the truth, and only if they pass do their opinions count.
+
+**From diff to a verdict that counts.** A verdict is used only if it is valid on its own terms and the judges have cleared the pre-registered bars on the known pairs and on agreement; test-retest and the wrong-ticket control are reported beside them. Judges that miss a bar are still printed, so the failure is visible, but nothing in this notebook rests on them.
+
+{{diagram:judges}}
+
+#%% md
+**`blind(src)`** turns one file into the version a judge is allowed to see. A judge that can read comments can be talked into a verdict by them ("validated carefully", "kept deliberately small"), and a docstring or a formatting habit can give away which arm wrote the code. So the self-check block the rules asked for is cut, and the rest goes through Python's own parser and back out with `ast.unparse`: every statement survives the round trip, and comments, docstrings and layout do not. Source that does not parse cannot make that trip, so it only loses its comment lines.
+
+#%% code
+def blind(src):
+    """The code as a judge sees it: the self-check block cut, comments, docstrings and
+    formatting gone. Source that does not parse is kept, minus its comment lines."""
+    start = check_tail_start(src)                       # the line where a trailing self-check begins, or None
+    if start is not None:
+        src = "\n".join(src.splitlines()[:start])       # everything from the self-check down is dropped
+    tree = _safe_parse(src)                             # None when the source is not valid Python
+    if tree is None:
+        # no tree to rebuild from, so the best available is to drop whole-line comments
+        return "\n".join(ln for ln in src.splitlines() if not ln.lstrip().startswith("#"))
+    for node in ast.walk(tree):
+        if not isinstance(node, (ast.Module, ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue                                    # only modules, classes and functions carry docstrings
+        if not node.body:
+            continue                                    # an empty module has nothing to strip
+        first = node.body[0]
+        # a docstring is a bare string constant as the first statement of the body
+        if isinstance(first, ast.Expr) and isinstance(first.value, ast.Constant) and isinstance(first.value.value, str):
+            node.body = node.body[1:] or [ast.Pass()]   # a body that was only a docstring still needs a statement
+    return ast.unparse(tree)                            # comments and formatting do not survive the round trip
+
+show_def(blind, layer="lab")
+
+#%% md
+A small file shows all three cuts at once: the docstring goes, the comment goes, and so does the `__main__` check that the rules ask every change to end with.
+
+#%% code
+# a function with a docstring, a comment and the self-check tail the rules ask for
+blind_demo_src = '''def area(w, h):
+    """Area of a rectangle."""
+    # width times height
+    return w * h
+
+
+if __name__ == "__main__":
+    assert area(2, 3) == 6
+'''
+print("[blind] as written:")
+print(textwrap.indent(blind_demo_src.rstrip(), "    "))
+print("[blind] as a judge sees it:")
+print(textwrap.indent(blind(blind_demo_src), "    "))
+
+#%% md
+**`blind_diff(seed, final)`** is a change as the judges receive it: a unified diff of every Python file the agent touched, with both sides blinded before they are compared. Test files are left out, as the meter leaves them out, so a careful test never counts against an answer. Blinding both sides first matters more than it looks: a change that only reworded comments or reflowed lines disappears entirely, so what reaches a judge is what the change does, never how it was dressed. Two lines of context per hunk and a cap of 6,000 characters keep a large change readable.
+
+#%% code
+def blind_diff(seed, final, limit=6000):
+    """A unified diff of every non-test Python file the change touched, both sides blinded."""
+    out = []
+    for path in sorted(final):                             # sorted, so the same change always reads the same way
+        if not path.endswith(".py") or is_test_file(path):
+            continue                                       # judges read code: tests and data files stay out
+        if final[path] == seed.get(path):
+            continue                                       # an untouched file has nothing to judge
+        a = blind(seed.get(path, ""))                      # a file the agent created is compared with nothing
+        b = blind(final[path])
+        if a == b:
+            continue                                       # only comments or layout changed: invisible once blinded
+        # two lines of context place each change without padding the diff
+        out += difflib.unified_diff(a.splitlines(), b.splitlines(), f"a/{path}", f"b/{path}", lineterm="", n=2)
+    text = "\n".join(out)
+    if len(text) <= limit:
+        return text
+    return text[:limit] + "\n(diff truncated)"            # a long change is cut, and says so
+
+show_def(blind_diff, layer="lab")
+
+#%% md
+**What a judge actually receives.** The bloated reference answer for `ob-postcode-cache`, diffed twice: once as the critic of Part VI reads it, once blinded. The blinded version has lost every comment and docstring the bloated answer used to explain itself, and the self-check at its end.
+
+#%% code
+t = SUITE["ob-postcode-cache"]                                       # a task whose bloated answer is easy to recognise
+# the seed with the bloated reference laid over it, read back as {path: text}
+bloated = snapshot(materialise(t, WS_DIR / f"judge-{t.id}-bloated", "bloated"))
+raw = change_diff(t.seed, bloated)                                   # the change as written
+seen = blind_diff(t.seed, bloated)                                   # the same change as a judge sees it
+print(f"[blind] {t.id}, the bloated answer: {len(raw.splitlines())} diff lines as written, "
+      f"{len(seen.splitlines())} as a judge sees them")
+for ln in seen.splitlines()[:16]:                                    # the head is enough to see the shape
+    print("    " + ln[:100])
+print("    ...")
+
+#%% md
+**`JUDGE_SYSTEM`** is the rubric, sent unchanged as the system message of every judge call. It fixes the shape of the reply (one JSON object), anchors each bloat score from 0 to 3 to something a reader can check, says outright that guards at trust boundaries are needed lines, and asks for every unneeded line to be copied from the diff. That last demand is what lets a verdict be checked rather than believed.
+
+#%% code
+JUDGE_SYSTEM = """You review a code change made for a ticket. You see the ticket, then the change as a diff of the Python files it touched. Comments, docstrings and formatting have been removed, so judge only what the code does.
+
+Reply with one JSON object and nothing else, in this shape:
+{"unneeded": [{"code": "<an added line, copied exactly>", "why": "<a few words>"}], "bloat": <0 to 3>, "complete": <true or false>, "missing": "<what the change leaves out, or an empty string>"}
+
+bloat:
+0 = every added line is needed for the ticket
+1 = a few added lines could go
+2 = the change adds a layer, class, option or helper that the ticket did not need
+3 = most of the change is not needed
+Lines that validate input arriving from outside, protect data from loss or corruption, or keep the code secure are needed, even when the ticket does not mention them.
+List at most five unneeded lines, each copied exactly from a line of the diff that starts with +. If bloat is above 0, list at least one.
+complete is true if the change does everything the ticket asks, judged from the code."""
+
+print(f"[judge] the rubric: {len(JUDGE_SYSTEM.split())} words in {len(JUDGE_SYSTEM.splitlines())} lines, "
+      "the same system message for every verdict")
+
+#%% md
+**`_norm(line)`** collapses every run of whitespace in a line to a single space. A judge copying a line out of the diff often gets the spacing slightly wrong, and a citation should not be thrown out over a doubled space or a tab, so both sides are normalised before they are compared: exact in content, forgiving in layout.
+
+#%% code
+def _norm(line):
+    """The line with every run of whitespace collapsed to one space, and none at either end."""
+    return " ".join(line.split())                       # split() with no argument also trims both ends
+
+show_def(_norm, layer="lab")
+
+#%% code
+norm_demo = "  CACHE  =\t{}   "                         # a line copied with stray spaces and a tab
+print(f"[norm] {norm_demo!r} compares as {_norm(norm_demo)!r}")
+
+#%% md
+**`parse_verdict(text, diff)`** decides whether a judge's reply counts at all. The reply must hold a JSON object with a bloat score from 0 to 3 and a true or false for completeness; anything else is refused, with the reason. The rule that matters most comes last: a bloat score above 0 must cite at least one line that is an added line of this diff, so a judge cannot call a change bloated without pointing at the bloat. A refused verdict is counted and reported, never patched up into a score.
+
+#%% code
+def parse_verdict(text, diff):
+    """(verdict, None) for a valid reply; (None, reason) for one that must be refused."""
+    # from the first { to the last }: JSON wrapped in prose or a code fence still parses
+    m = re.search(r"\{.*\}", text or "", re.S)
+    try:
+        v = json.loads(m.group(0)) if m else None       # no braces at all means no verdict
+    except json.JSONDecodeError:
+        v = None                                        # braces around something that is not JSON
+    if not isinstance(v, dict):
+        return None, "not JSON"
+    bloat = v.get("bloat")
+    complete = v.get("complete")
+    # True == 1 in Python, so a boolean has to be turned away before the range test
+    if isinstance(bloat, bool) or bloat not in (0, 1, 2, 3) or not isinstance(complete, bool):
+        return None, "no valid bloat or complete"
+    added = set()                                       # every added line of the diff, spacing normalised
+    for ln in diff.splitlines():
+        if ln.startswith("+") and not ln.startswith("+++"):     # "+++" opens a file header, not a line of code
+            added.add(_norm(ln[1:]))
+    claims = [u for u in v.get("unneeded") or [] if isinstance(u, dict)]     # a malformed entry is skipped
+    cited = [u for u in claims if _norm(str(u.get("code", ""))) in added]    # only lines that are in the diff count
+    if bloat > 0 and not cited:
+        return None, "a bloat score with no citation found in the diff"     # refused, never repaired
+    verdict = {"bloat": int(bloat),                     # 2.0 passes the range test, and is stored as 2
+               "complete": complete,
+               "cited": len(cited),
+               "uncited": len(claims) - len(cited),     # lines the judge quoted that the diff does not contain
+               "missing": str(v.get("missing", ""))[:200]}   # capped, so a rambling reply cannot flood a table
+    return verdict, None
+
+show_def(parse_verdict, layer="lab")
+
+#%% md
+**`judge(model, ticket, diff)`** makes one judge call and returns a verdict, or a refusal with its reason. The request carries only the rubric, the ticket and the blinded diff, at temperature 0, with whatever the S12 probe showed the model can do: thinking switched off, and JSON output enforced by the endpoint. An empty diff never reaches a model, because there is nothing to judge, and an API failure comes back as a refusal, never as a score.
+
+#%% code
+def judge(model, ticket, diff, replica=0, tag="judge"):
+    """One blinded, cited verdict, or a refusal with its reason. No change means nothing to judge."""
+    if not diff.strip():
+        # an empty change is clean by definition, and costs no call
+        return {"bloat": 0, "complete": None, "cited": 0, "uncited": 0, "missing": "", "refused": None}
+    extra = {}                                                          # only what the S12 probe saw this model do
+    if "thinking off" in CAN.get(model, ()):
+        extra["enable_thinking"] = False                                # a verdict is short: thinking only adds time
+    if "JSON mode" in CAN.get(model, ()):
+        extra["response_format"] = {"type": "json_object"}             # the endpoint enforces the shape as well
+    messages = [{"role": "system", "content": JUDGE_SYSTEM},            # the rubric
+                {"role": "user", "content": f"The ticket:\n{ticket}\n\nThe change:\n{diff}"}]   # ticket first, then the diff
+    # temperature 0, so the same question gets the same answer as far as the model allows
+    r = FRONT_DOOR.chat(model, messages, tag=tag, replica=replica, temperature=0.0, max_tokens=1500, **extra)
+    if r.finish == "error":
+        return {"refused": "API error"}                                 # counted with the refusals, never as a score
+    v, why = parse_verdict(r.text, diff)                                # citations are checked against this same diff
+    if v:
+        return {**v, "refused": None}
+    return {"refused": why}
+
+show_def(judge, layer="lab")
+
+#%% md
+**`_scripted_judge(model, messages, params)`** is the judge's stand-in for smoke runs, where no model is called. It recognises a judge request by the rubric's first words and scores the change by size alone: up to 8 added lines is 0, up to 20 is 1, anything larger is 2, with the first added line cited whenever the score is above 0. It is deliberately simple; its only job is to hand `parse_verdict` a well-formed reply, so the rest of the Part runs end to end without a key.
+
+#%% code
+@SCRIPTED.register
+def _scripted_judge(model, messages, params):
+    """A judge for smoke runs: bloat from the size of the change, one citation when it is above 0."""
+    if not messages[0]["content"].startswith("You review a code change"):
+        return None                                                     # not a judge request: another responder takes it
+    diff = messages[-1]["content"].split("The change:\n", 1)[-1]        # the diff is everything after its heading
+    added = []
+    for ln in diff.splitlines():
+        if ln.startswith("+") and not ln.startswith("+++") and ln[1:].strip():
+            added.append(ln[1:])                                        # each non-blank added line, without its "+"
+    if len(added) <= 8:
+        bloat = 0                                                       # a small change: nothing to cite
+    elif len(added) <= 20:
+        bloat = 1
+    else:
+        bloat = 2
+    cite = [{"code": added[0], "why": "not needed"}] if bloat else []   # a score above 0 must point at a line
+    return json.dumps({"unneeded": cite, "bloat": bloat, "complete": True, "missing": ""})
+
+show_def(_scripted_judge, layer="lab")
+
+#%% code
+# twelve added lines, which the stand-in scores as 1, called directly: no model and no ledger involved
+stand_in_diff = "+++ b/x.py\n" + "\n".join(f"+X{n} = {n}" for n in range(12))
+stand_in_msgs = [{"role": "system", "content": JUDGE_SYSTEM},
+                 {"role": "user", "content": "The ticket:\nAdd twelve constants.\n\nThe change:\n" + stand_in_diff}]
+stand_in_reply = _scripted_judge("smoke", stand_in_msgs, {})
+print(f"[scripted judge] reply: {stand_in_reply}")
+print(f"  parse_verdict gives: {parse_verdict(stand_in_reply, stand_in_diff)}")
+
+#%% md
+**The refusal rules, tested.** Each test hands `parse_verdict` a reply that a careless parser would accept and checks that it is turned away for the right reason; the last two check that sound verdicts are not turned away with them.
+
+#%% code
+print("[judge] refusal tests:")
+results = []                                                        # expect() records each test here
+d = "+++ b/x.py\n+def f():\n+    return 1\n+CACHE = {}"              # a file header and three added lines
+expect("a verdict that is not JSON is refused", parse_verdict("I think it is fine.", d)[1] == "not JSON")
+expect("a bloat score without a citation is refused",
+       parse_verdict('{"bloat": 2, "complete": true, "unneeded": []}', d)[0] is None)
+expect("a citation that is not in the diff does not count",
+       parse_verdict('{"bloat": 1, "complete": true, "unneeded": [{"code": "import os"}]}', d)[0] is None)
+expect("a citation copied with different spacing still counts",
+       parse_verdict('{"bloat": 1, "complete": true, "unneeded": [{"code": "CACHE  =  {}"}]}', d)[0]["cited"] == 1)
+expect("true is not a bloat score", parse_verdict('{"bloat": true, "complete": true}', d)[0] is None)
+expect("a clean verdict needs no citation",
+       parse_verdict('{"bloat": 0, "complete": false, "unneeded": []}', d)[0]["bloat"] == 0)
+
+#%% md
+**Validating the judges.** Three tests run before any agent's code is judged. The **known-answer pairs** are the good and bloated references of every task; we know which is which, so a judge that cannot rank them is measuring something else. **Agreement** between the two judges on the same items is summarised by a weighted kappa, which counts a disagreement of two points as worse than one and corrects for the agreement two judges would reach by chance. **Test-retest** asks the first judge again, as a separate request, and counts how often it says the same thing twice. And the **wrong-ticket control** shows the first judge each good answer beside the *next* task's ticket: a judge that reads the ticket should say the change is not complete, and one that says "complete" anyway is judging the code's polish, not its fit.
+
+#%% md
+**`JUDGES`** maps the two judge roles to the models S0 chose for them. Both come from a different model generation than the coder, which keeps them a step away from grading text written the way they would write it.
+
+#%% code
+JUDGES = {"judge": MODEL_FOR["judge"], "judge2": MODEL_FOR["judge2"]}     # role name to model id
+for role, model_id in JUDGES.items():
+    print(f"[judges] {role:<7} {model_id.split('/')[-1]}")
+
+#%% md
+**`judge_all(items)`** puts every item in front of every judge in `roles` and stores each verdict on its item, under the judge's role name. The calls are independent of each other, so a thread pool runs them side by side, and `pool.map` hands the verdicts back in the order the jobs went in, which is what lets each one be written back to the right item. A retest is stored under its own key (`judge@1`), so asking the same question twice never overwrites the first answer.
+
+#%% code
+def judge_all(items, roles=("judge", "judge2"), replica=0, tag="judge"):
+    """Every item by every judge in `roles`, in parallel; each verdict is stored on its item."""
+    jobs = [(i, role) for i in range(len(items)) for role in roles]    # one job per item and judge
+
+    def one(job):                                                       # what a worker does with one job
+        i, role = job                                                   # which item, and which judge reads it
+        return judge(JUDGES[role], items[i]["ticket"], items[i]["diff"], replica, tag)
+
+    with ThreadPoolExecutor(WORKERS) as pool:
+        verdicts = list(pool.map(one, jobs))                            # results come back in the order of the jobs
+    for (i, role), v in zip(jobs, verdicts):
+        key = role if replica == 0 else f"{role}@{replica}"             # a retest sits beside the first verdict
+        items[i][key] = v
+    return items
+
+show_def(judge_all, layer="lab")
+
+#%% md
+**`panel_score(item)`** is the panel's bloat score for one item: the mean of its valid verdicts. A refused verdict is left out rather than counted as zero, and an item that every judge refused has no score at all (`None`), so a judge that refuses often cannot drag the average towards "clean".
+
+#%% code
+def panel_score(item, roles=("judge", "judge2")):
+    """The mean bloat of the valid verdicts on an item; None if every judge refused."""
+    scores = []
+    for r in roles:
+        if r in item and not item[r]["refused"]:        # a missing or refused verdict has no score to give
+            scores.append(item[r]["bloat"])
+    if not scores:
+        return None                                     # nobody gave a usable verdict: no score, rather than 0
+    return float(np.mean(scores))
+
+show_def(panel_score, layer="lab")
+
+#%% code
+# two judges, both with a usable verdict
+panel_demo = {"judge": {"bloat": 1, "refused": None}, "judge2": {"bloat": 3, "refused": None}}
+print(f"[panel] two valid verdicts, 1 and 3: {panel_score(panel_demo)}")
+panel_demo["judge2"] = {"refused": "not JSON"}           # the second judge's reply was refused
+print(f"[panel] one of them refused: {panel_score(panel_demo)} (left out, not counted as 0)")
+panel_demo["judge"] = {"refused": "API error"}           # and now the first as well
+print(f"[panel] both refused: {panel_score(panel_demo)}")
+
+#%% md
+**`weighted_kappa(a, b)`** measures how far two raters agree beyond what chance would give them, on the 0 to 3 scale. It compares the disagreement they actually show with the disagreement two raters with the same habits would show if they scored independently: 1 is perfect agreement, 0 is no better than chance, and below 0 is worse. The weights are quadratic, so a disagreement of two points costs four times one of a single point, which suits an ordered scale where 0 against 1 is a quibble and 0 against 3 is a contradiction.
+
+#%% code
+def weighted_kappa(a, b, k=4):
+    """Cohen's kappa with quadratic weights for two raters on an ordinal 0..k-1 scale."""
+    obs = np.zeros((k, k))                              # obs[x, y]: how often rater a said x while rater b said y
+    for x, y in zip(a, b):
+        obs[x, y] += 1
+    obs /= obs.sum()                                    # counts to shares
+    # what two raters with these same habits would produce by scoring independently
+    expected = np.outer(obs.sum(1), obs.sum(0))
+    # the cost of a disagreement grows with its square, scaled so the worst one costs 1
+    w = np.array([[(i - j) ** 2 for j in range(k)] for i in range(k)]) / (k - 1) ** 2
+    chance = (w * expected).sum()                       # the weighted disagreement chance alone would give
+    if not chance:
+        return 1.0                                      # both raters gave every item one and the same score
+    return float(1 - (w * obs).sum() / chance)
+
+show_def(weighted_kappa, layer="lab")
+
+#%% code
+kappa_demo = [0, 1, 2, 3, 0, 1, 2, 3]                                   # eight items, every score used twice
+print(f"[kappa] identical scores:               {weighted_kappa(kappa_demo, kappa_demo):+.2f}")
+print(f"[kappa] the second rater one point up:  {weighted_kappa(kappa_demo, [min(s + 1, 3) for s in kappa_demo]):+.2f}")
+print(f"[kappa] the scale turned upside down:   {weighted_kappa(kappa_demo, [3 - s for s in kappa_demo]):+.2f}")
+
+#%% md
+**The known-answer set.** Every task's good and bloated references, laid over the seed and blinded exactly as an agent's change will be. For each pair we know the right ranking, so a judge that cannot find it is measuring something else.
+
+#%% code
+REF_ITEMS = []                                                         # one item per reference answer
+for t in SUITE.values():
+    for ref in ("good", "bloated"):
+        if ref not in t.refs:
+            continue                                                   # a task without this reference adds nothing
+        ref_ws = materialise(t, WS_DIR / f"judge-{t.id}-{ref}", ref)   # the seed with the reference laid over it
+        REF_ITEMS.append({"task": t.id, "ref": ref, "ticket": t.prompt,
+                          "diff": blind_diff(t.seed, snapshot(ref_ws))})   # exactly what a judge will be shown
+empty_refs = [i["task"] for i in REF_ITEMS if not i["diff"].strip()]   # judged clean without a call
+print(f"[known answers] {len(REF_ITEMS)} reference answers from {len(SUITE)} tasks; "
+      f"with no change a judge can see: {', '.join(empty_refs) or 'none'}")
+
+#%% md
+**Validation and retest.** Both judges score every reference answer. Then the first judge is asked the same questions again, as separate requests (`replica=1`), because temperature 0 narrows a model's answers without guaranteeing them, and test-retest measures how often it changes its mind.
+
+#%% code
+judge_all(REF_ITEMS, tag="judge:validate")                             # both judges, every reference answer
+judge_all(REF_ITEMS, roles=("judge",), replica=1, tag="judge:retest")  # judge 1 again, stored as "judge@1"
+stored = Counter(k for i in REF_ITEMS for k in i if k.startswith("judge"))   # verdicts per key, across the items
+print(f"[judges] verdicts stored on the {len(REF_ITEMS)} reference answers: {dict(stored)}")
+
+#%% md
+**The wrong-ticket control.** Each good change is shown to the first judge beside the ticket of the task after it in alphabetical order, and the last change beside the first task's ticket. The change is sound code written for some other ticket, so a judge that really reads the ticket should call it incomplete.
+
+#%% code
+# task id to its good change; a good answer that changes nothing visible has nothing to mismatch
+goods = {i["task"]: i["diff"] for i in REF_ITEMS if i["ref"] == "good" and i["diff"].strip()}
+order = sorted(goods)                      # each good change, shown with the next task's ticket
+shifted = order[1:] + order[:1]            # the same list moved along by one, so every change gets a stranger's ticket
+WRONG = [{"task": a, "ticket": SUITE[b].prompt, "diff": goods[a]} for a, b in zip(order, shifted)]
+judge_all(WRONG, roles=("judge",), tag="judge:wrong-ticket")
+print(f"[wrong ticket] {len(WRONG)} good changes judged against another task's ticket")
+if WRONG:
+    print(f"  for example, the change for {order[0]} under the ticket for {shifted[0]}")
+
+#%% md
+**The known pairs, side by side.** For each task: both judges' scores for the good and the bloated reference, the panel's mean for each, and whether the panel put the bloated answer above the good one. A tie, or a refusal on either side, does not count as ranked.
+
+#%% code
+show = lambda v: "refused" if v["refused"] else str(v["bloat"])     # one verdict as table text
+PAIRS = []
+for t in SUITE.values():
+    g = next((i for i in REF_ITEMS if i["task"] == t.id and i["ref"] == "good"), None)      # the good reference's item
+    b = next((i for i in REF_ITEMS if i["task"] == t.id and i["ref"] == "bloated"), None)   # and the bloated one's
+    if g and b:                                                     # a pair needs both halves
+        pg, pb = panel_score(g), panel_score(b)
+        ranked = pg is not None and pb is not None and pb > pg      # a tie is not a win, and neither is a refusal
+        PAIRS.append({"task": t.id,
+                      "judge": f"{show(g['judge'])} / {show(b['judge'])}",
+                      "judge2": f"{show(g['judge2'])} / {show(b['judge2'])}",
+                      "good": pg, "bloated": pb,
+                      "ranked": "yes" if ranked else "NO"})
+table(PAIRS, [("task", "task", ""), ("judge", "judge 1: good / bloated", ""), ("judge2", "judge 2: good / bloated", ""),
+              ("good", "panel, good", ".1f"), ("bloated", "panel, bloated", ".1f"), ("ranked", "bloated ranked higher", "")])
+
+#%% md
+**`both_valid(items, a, b)`** collects the pairs of scores that two verdict keys gave the same items, keeping only the items on which both verdicts are valid. Agreement can only be measured where both raters actually answered, so a refusal on either side drops the item instead of turning into a disagreement. It is used three times: judge 1 against judge 2, judge 1 against itself asked again, and the two judges on the agents' code.
+
+#%% code
+def both_valid(items, a, b):
+    """(score from a, score from b) for every item on which both verdicts exist and neither was refused."""
+    pairs = []
+    for i in items:
+        if a in i and b in i and not i[a]["refused"] and not i[b]["refused"]:
+            pairs.append((i[a]["bloat"], i[b]["bloat"]))    # one item, two raters
+    return pairs
+
+show_def(both_valid, layer="lab")
+
+#%% md
+**The validation numbers.** The share of known pairs ranked the right way round, the agreement between the two judges, and the first judge's agreement with itself. The first two are the pre-registered bars of H9: 90% of pairs ranked, and a weighted kappa of at least 0.6.
+
+#%% code
+ref_pairs = both_valid(REF_ITEMS, "judge", "judge2")                    # judge 1 against judge 2
+retest = both_valid(REF_ITEMS, "judge", "judge@1")                      # judge 1 against itself, asked again
+RANKED = float(np.mean([p["ranked"] == "yes" for p in PAIRS]))          # share of known pairs ranked correctly
+# zip(*pairs) turns a list of (a, b) pairs into the two raters' score lists
+KAPPA = weighted_kappa(*zip(*ref_pairs)) if ref_pairs else float("nan")
+RETEST_KAPPA = weighted_kappa(*zip(*retest)) if retest else float("nan")
+same_twice = float(np.mean([x == y for x, y in retest])) if retest else float("nan")   # the plain share of repeats
+print(f"[judges] {JUDGES['judge'].split('/')[-1]} and {JUDGES['judge2'].split('/')[-1]}, "
+      f"{len(REF_ITEMS)} reference answers each")
+print(f"  bloated ranked above good on {RANKED:.0%} of {len(PAIRS)} tasks (pre-registered bar: 90%)")
+print(f"  agreement between the judges: weighted kappa {KAPPA:.2f} on {len(ref_pairs)} items (bar: 0.60)")
+print(f"  test-retest, judge 1 asked twice: same score {same_twice:.0%}, weighted kappa {RETEST_KAPPA:.2f}")
+
+#%% md
+**Does the judge read the ticket, and what did it refuse?** The completeness verdicts from the wrong-ticket control are set against the same judge's verdicts on the right tickets, and every refusal so far is counted by its reason.
+
+#%% code
+# completeness under a stranger's ticket, from every valid verdict that says either way
+fits = [w["judge"]["complete"] for w in WRONG if not w["judge"]["refused"] and w["judge"]["complete"] is not None]
+# and under the right ticket, from the good references
+right = [i["judge"]["complete"] for i in REF_ITEMS
+         if i["ref"] == "good" and not i["judge"]["refused"] and i["judge"]["complete"] is not None]
+refusals = Counter()                                                    # refusal reason to how often it happened
+for its in (REF_ITEMS, WRONG):
+    for i in its:
+        for k, v in i.items():
+            if k.startswith("judge") and v["refused"]:                  # "judge", "judge2" and "judge@1" hold verdicts
+                refusals[v["refused"]] += 1
+print(f"  wrong-ticket control: judged complete for the wrong ticket {np.mean(fits):.0%} of the time, "
+      f"for the right ticket {np.mean(right):.0%}")
+print(f"  refused verdicts: {dict(refusals) or 'none'}")
+
+#%% md
+**H9's verdict.** Valid only if both pre-registered bars are met. If they are not, every verdict below is still printed, and nothing is built on it.
+
+#%% code
+H9 = "VALID" if KAPPA >= 0.6 and RANKED >= 0.9 else "NOT VALID"         # both bars, or neither counts
+JUDGES_VALID = H9 == "VALID"                                            # later cells check this before leaning on a verdict
+print(f"\n  H9: {H9}" + ("" if JUDGES_VALID else "  (the judges' verdicts below are printed, and no claim rests on them)"))
+save_exp("judges", {"ranked": RANKED, "kappa": KAPPA, "retest_kappa": RETEST_KAPPA, "same_twice": same_twice,
+                    "wrong_ticket_complete": float(np.mean(fits)) if fits else None,
+                    "right_ticket_complete": float(np.mean(right)) if right else None,
+                    "refused": sum(refusals.values()), "h9": H9, "pairs": len(PAIRS)})
+
+#%% md
+**Judging the main experiment.** Every scored episode of the main comparison is judged by both judges, blind to its arm. The table gives each arm's mean panel score (the mean of the two judges' bloat scores), the share of episodes the panel scored 2 or more (a needless layer, class, option or helper), and the share it judged complete. The paired difference between the full system and the unguided agent is computed per task, like every comparison in Part VII, and its interval comes from resampling tasks. The last line asks whether the judges and the meter agree at all: the rank correlation between the panel score and the lines the meter counted.
+
+#%% md
+**`spearman(x, y)`** is a rank correlation: each value is replaced by its rank, and the ordinary correlation is taken on the ranks. It asks only whether two measures put the episodes in the same order, which is the right question for a line count and a 0 to 3 score that share no units. Tied values share their average rank, which matters here because most panel scores are 0.
+
+#%% code
+def spearman(x, y):
+    """Rank correlation, with tied values sharing their average rank."""
+    def ranks(v):
+        v = np.asarray(v, float)                                    # any sequence of numbers, as floats
+        r = np.empty(len(v))                                        # filled with each value's rank
+        r[np.argsort(v, kind="mergesort")] = np.arange(len(v))     # 0 for the smallest value, 1 for the next, and so on
+        for u in np.unique(v):
+            r[v == u] = r[v == u].mean()                            # tied values share the mean of the ranks they span
+        return r
+
+    if len(x) <= 2:
+        return float("nan")                                         # two points always line up: no evidence either way
+    return float(np.corrcoef(ranks(x), ranks(y))[0, 1])            # Pearson's correlation, taken on the ranks
+
+show_def(spearman, layer="lab")
+
+#%% code
+print(f"[spearman] same order, very different scales: {spearman([1, 2, 3, 4, 5], [2, 4, 6, 8, 100]):+.2f}")
+print(f"[spearman] opposite order:                    {spearman([1, 2, 3, 4, 5], [9, 7, 5, 3, 1]):+.2f}")
+print(f"[spearman] mostly ties, as panel scores are:  {spearman([3, 5, 8, 12, 20], [0, 0, 0, 1, 2]):+.2f}")
+
+#%% md
+**Every episode of the main experiment, blinded and judged.** Each scored episode becomes an item: its ticket and its blinded diff for the judges, and its arm, line count and hidden-test result kept aside for the analysis. The arm never reaches a judge.
+
+#%% code
+EP_ITEMS = []                                                       # one item per scored episode, every arm
+for r in MAIN:
+    if not (r.score and r.episode):
+        continue                                                    # a failed run has no workspace worth judging
+    EP_ITEMS.append({"task": r.task, "ticket": SUITE[r.task].prompt,
+                     "arm": r.arm, "replica": r.replica,            # kept for the analysis, never shown to a judge
+                     "added": r.score.added_code, "passed": r.score.passed,     # the meter's and the tests' view
+                     "diff": blind_diff(SUITE[r.task].seed, snapshot(r.episode.ws))})
+judge_all(EP_ITEMS, tag="judge:episode")                            # both judges on every episode
+print(f"[episodes] {len(EP_ITEMS)} scored episodes judged, "
+      f"{sum(panel_score(i) is not None for i in EP_ITEMS)} with at least one valid verdict")
+
+#%% md
+**`completeness(i)`** is the panel's completeness verdict on one item: the share of the two judges that called it complete, counting only the verdicts that say either way. A refused verdict casts no vote, and neither does an empty change (its verdict is `None`, since there was nothing to judge). An item with no votes at all has no verdict, not a "no".
+
+#%% code
+def completeness(i):
+    """The share of the judges calling an item complete, from the verdicts that say either way; None if none do."""
+    votes = []
+    for r in ("judge", "judge2"):
+        if not i[r]["refused"] and i[r]["complete"] is not None:   # a refusal, or an empty change, casts no vote
+            votes.append(i[r]["complete"])
+    if not votes:
+        return None
+    return np.mean(votes)                                           # 1, 0.5 or 0
+
+show_def(completeness, layer="lab")
+
+#%% md
+**Each arm through the judges' eyes.** The mean panel score, the share of episodes the panel scored 2 or more (a needless layer, class, option or helper), and the share it judged complete.
+
+#%% code
+JUDGED = []
+for arm in ARM_NAMES:
+    its = [i for i in EP_ITEMS if i["arm"] == arm]                  # this arm's episodes
+    scores = [s for s in map(panel_score, its) if s is not None]    # the panel's score, where it has one
+    comp = [c for c in map(completeness, its) if c is not None]     # the completeness verdict, where it has one
+    JUDGED.append({"arm": arm, "episodes": len(its), "scored": len(scores),
+                   "bloat": np.mean(scores) if scores else None,
+                   "heavy": np.mean([s >= 2 for s in scores]) if scores else None,   # 2 or more: a needless layer
+                   "complete": np.mean(comp) if comp else None})
+table(JUDGED, [("arm", "arm", ""), ("episodes", "episodes", "d"), ("scored", "with a valid verdict", "d"),
+               ("bloat", "panel bloat", ".2f"), ("heavy", "scored 2 or more", ".0%"), ("complete", "judged complete", ".0%")])
+
+#%% md
+**`by_task(arm)`** reduces an arm's judged episodes to one panel score per task, the mean over its replicas. Every comparison in Part VII is paired by task, and the judges' comparison has to be too: tasks differ from each other far more than two runs of one task do.
+
+#%% code
+def by_task(arm):
+    """{task id: the arm's mean panel score on that task}, over the episodes the panel could score."""
+    out = {}
+    for t in SUITE:
+        s = []                                                      # this task's panel scores under this arm
+        for i in EP_ITEMS:
+            if i["arm"] != arm or i["task"] != t:
+                continue
+            item_score = panel_score(i)
+            if item_score is not None:                              # an episode both judges refused has no score
+                s.append(item_score)
+        if s:
+            out[t] = float(np.mean(s))                              # a task with no score at all is left out
+    return out
+
+show_def(by_task, layer="lab")
+
+#%% md
+**The full system against the unguided agent, paired by task.** The difference in panel score per task, averaged, with an interval from resampling tasks, as for every comparison in Part VII.
+
+#%% code
+a_, b_ = by_task("full"), by_task("off")                            # per-task scores for the two arms compared
+diffs = {t: a_[t] - b_[t] for t in a_ if t in b_}                   # only tasks both arms have a score on
+samples = bootstrap(diffs, np.mean)                                 # resample tasks, not episodes
+D_BLOAT = float(np.mean(list(diffs.values()))) if diffs else float("nan")
+CI_BLOAT = np.percentile(samples, [2.5, 97.5])                      # the middle 95% of the resampled means
+print(f"\n  full minus off, panel bloat per task: {D_BLOAT:+.2f} ({CI_BLOAT[0]:+.2f} to {CI_BLOAT[1]:+.2f}) over {len(diffs)} tasks")
+
+#%% md
+**Do the judges and the meter agree?** The rank correlation between the panel's score and the lines the meter counted, and the two judges' agreement on the agents' code rather than on our references.
+
+#%% code
+valid_items = [i for i in EP_ITEMS if panel_score(i) is not None]   # episodes with a panel score
+RHO = spearman([i["added"] for i in valid_items], [panel_score(i) for i in valid_items])
+ep_pairs = both_valid(EP_ITEMS, "judge", "judge2")                  # the judges against each other on agents' code
+EP_KAPPA = weighted_kappa(*zip(*ep_pairs)) if ep_pairs else float("nan")
+print(f"  the judges and the meter: rank correlation {RHO:.2f} between panel bloat and code added, {len(valid_items)} episodes")
+print(f"  agreement between the judges on agents' code: weighted kappa {EP_KAPPA:.2f} on {len(ep_pairs)} episodes")
+print("  " + ("the judges passed validation, so this is a second, independent measure of bloat" if JUDGES_VALID
+              else "NOT VALID: the judges failed validation, so these numbers are shown and not used"))
+save_exp("judged", {"valid": JUDGES_VALID, "diff": D_BLOAT, "lo": CI_BLOAT[0], "hi": CI_BLOAT[1], "rho": RHO,
+                    "episode_kappa": EP_KAPPA,
+                    **{r["arm"]: {"bloat": r["bloat"], "heavy": r["heavy"], "complete": r["complete"]} for r in JUDGED}})
+
+#%% md
+**What the figure needs.** The agreement grid counts every item, reference answers and agents' episodes together, by the score each judge gave it; the bar colours mark the two arms the comparison is about.
+
+#%% code
+grid = np.zeros((4, 4))                         # grid[judge 1's score, judge 2's score]: how many items
+for x, y in ref_pairs + ep_pairs:               # the reference answers and the agents' episodes together
+    grid[x, y] += 1
+bar_colours = []                                # one colour per arm, in JUDGED's order
+for r in JUDGED:
+    if r["arm"] == "full":
+        bar_colours.append(C1)                  # the full system stands out
+    elif r["arm"] == "off":
+        bar_colours.append(INK2)                # the unguided agent it is compared with
+    else:
+        bar_colours.append(MUTED)               # the other arms, for context
+print("[agreement] items by judge 1's score (rows) and judge 2's score (columns):")
+print("        " + "".join(f"{j:>6}" for j in range(4)))
+for i in range(4):
+    print(f"  {i:>4}  " + "".join(f"{int(grid[i, j]):>6}" for j in range(4)))
+
+#%% code
+# FIG  the judges
+fig, axes = plt.subplots(1, 3, figsize=(12, 3.4), gridspec_kw={"width_ratios": [1, 0.9, 1.1]})
+ax = axes[0]                                                    # left: the known-answer pairs
+for p in PAIRS:
+    if p["good"] is not None and p["bloated"] is not None:      # a pair with a refused side has no line to draw
+        # green when the bloated answer scored higher, red when it did not
+        ax.plot([0, 1], [p["good"], p["bloated"]], color=C3 if p["ranked"] == "yes" else C8, lw=0.8, alpha=0.6)
+ax.set_xticks([0, 1], ["good", "bloated"])
+ax.set_xlim(-0.3, 1.3)                                          # a little room either side of the two columns
+ax.set_ylim(-0.2, 3.2)                                          # the whole 0 to 3 scale, with a margin
+ax.set_ylabel("panel bloat score")
+panel(ax, f"known answers: bloated ranked higher on {RANKED:.0%}")
+ax = axes[1]                                                    # middle: where the two judges agree
+ax.imshow(grid, cmap="Blues")                                   # darker cells hold more items
+for i in range(4):
+    for j in range(4):
+        # each cell's count, white on the darker cells so it stays readable
+        ax.text(j, i, int(grid[i, j]), ha="center", va="center", fontsize=8, color=INK if grid[i, j] < grid.max() / 2 else "white")
+ax.set_xticks(range(4))
+ax.set_yticks(range(4))
+ax.set_xlabel("judge 2")
+ax.set_ylabel("judge 1")
+ax.grid(False)                                                  # grid lines would cut through the cells
+panel(ax, f"agreement: kappa {KAPPA:.2f} on references, {EP_KAPPA:.2f} on agents' code")
+ax = axes[2]                                                    # right: the main experiment, arm by arm
+x = np.arange(len(JUDGED))
+ax.bar(x, [r["bloat"] or 0 for r in JUDGED], 0.6, color=bar_colours)    # an arm with no valid verdict draws as 0
+ax.set_xticks(x, [r["arm"] for r in JUDGED])
+ax.set_ylim(0, 3)                                               # the full scale, so a small difference looks small
+panel(ax, "mean panel bloat per arm, main experiment")
+finish(fig, "s78_judges", f"The judges are {H9.lower()}: they ranked {RANKED:.0%} of known pairs correctly, kappa {KAPPA:.2f}",
+       "left: one line per task, green if the bloated answer scored higher; middle: both judges' scores on every item")
+
+#%% md
+**Reading FIG 20 (s78_judges).** The left panel is the known-answer test: one line per task, from the panel's score for the good reference to its score for the bloated one, green when the bloated answer scored higher. The judges ranked {{exp:judges.ranked:.0%}} of the {{exp:judges.pairs}} pairs correctly against a bar of 90%, and agreed with each other at a weighted kappa of {{exp:judges.kappa:.2f}} against a bar of 0.60, so H9's verdict is {{pick:judges.h9|VALID=that the judges are valid instruments on this suite|NOT VALID=that the judges are not valid instruments on this suite, and nothing below rests on them}}. The middle panel shows where the agreement and the disagreement sit: counts on the diagonal are items on which both judges gave the same score. It pools our reference answers, on which the judges agree closely (kappa {{exp:judges.kappa:.2f}}), with the agents' episodes, which are most of its items and on which they agree far less (kappa {{exp:judged.episode_kappa:.2f}}). The bar in H9 was set on the references, so it says the judges can tell a good answer from a bloated one, not that they agree about ordinary agent code; that is why the meter, not the panel, carries every headline. Asked the same question twice, the first judge gave the same score {{exp:judges.same_twice:.0%}} of the time, and it judged a good answer complete for the wrong ticket {{exp:judges.wrong_ticket_complete:.0%}} of the time against {{exp:judges.right_ticket_complete:.0%}} for the right one; the gap between those two numbers is how much the judge reads the ticket at all. The right panel is the main experiment through the judges' eyes. Across episodes, the panel's score and the meter's line count have a rank correlation of {{exp:judged.rho:.2f}}, and the full system's panel score minus the unguided agent's, paired by task, is {{exp:judged.diff:+.2f}} ({{exp:judged.lo:+.2f}} to {{exp:judged.hi:+.2f}}).
+
+#%% md
+## S79 - Completeness: did the smaller answer do the whole job?
+
+**Theory.** A system that writes less can do so by doing less, and the hidden tests only catch the parts of a ticket somebody thought to test. The judges' second verdict, *complete*, reads the ticket against the code and so can notice a requirement that no test checks. It also has its own blind spot: it cannot run anything, so it will call a subtly broken change complete. The table therefore puts the two side by side. Where the hidden test and the panel agree, either can be trusted; where they disagree, the disagreement says which instrument is missing what.
+
+**In plain terms.** Did the shorter answers quietly skip part of the ticket? We ask the judges, and compare what they say with what the tests found.
+
+#%% code
+rows = []
+for arm in ARM_NAMES:
+    arm_items = [i for i in EP_ITEMS if i["arm"] == arm]           # every judged episode of this arm
+    # the explicit and open tasks, where quietly doing less would hurt most
+    its = [i for i in EP_ITEMS if i["arm"] == arm and SUITE[i["task"]].category in ("explicit", "open")]
+    comp = [c for c in map(completeness, its) if c is not None]
+    allc = [c for c in map(completeness, arm_items) if c is not None]
+    rows.append({"arm": arm,
+                 "explicit/open": np.mean(comp) if comp else None,
+                 "all tasks": np.mean(allc) if allc else None,
+                 "hidden pass": np.mean([i["passed"] for i in arm_items])})    # what the hidden tests said
+table(rows, [("arm", "arm", ""), ("explicit/open", "judged complete, explicit and open", ".0%"),
+             ("all tasks", "judged complete, all", ".0%"), ("hidden pass", "hidden tests pass", ".0%")])
+
+#%% md
+**The hidden test against the panel, episode by episode.** An episode counts as judged complete when at least half the panel's votes say so. The two disagreeing cells are the interesting ones: each says which instrument is missing what.
+
+#%% code
+# (passed the hidden test?, judged complete?) for every episode the panel gave a completeness verdict
+cross = Counter((i["passed"], completeness(i) >= 0.5) for i in EP_ITEMS if completeness(i) is not None)
+print("\n  hidden test against the panel, every judged episode:")
+print(f"    passed and judged complete      {cross[(True, True)]:>4}")
+print(f"    passed, judged incomplete       {cross[(True, False)]:>4}   (a requirement no test checks, or a strict judge)")
+print(f"    failed, judged complete         {cross[(False, True)]:>4}   (a bug the judges cannot see without running it)")
+print(f"    failed and judged incomplete    {cross[(False, False)]:>4}")
+agree = (cross[(True, True)] + cross[(False, False)]) / max(1, sum(cross.values()))    # the diagonal's share
+print(f"  agreement: {agree:.0%}")
+save_exp("completeness", {**{r["arm"]: {"explicit_open": r["explicit/open"], "all": r["all tasks"]} for r in rows},
+                          "agree": agree, "pass_incomplete": cross[(True, False)], "fail_complete": cross[(False, True)]})
+
+#%% md
+The column to read first is the explicit and open tasks, where the ticket asks for something substantial and the risk of quietly doing less is greatest. The full system was judged complete on {{exp:completeness.full.explicit_open:.0%}} of those episodes and the unguided agent on {{exp:completeness.off.explicit_open:.0%}}. Overall, the hidden tests and the panel agreed on {{exp:completeness.agree:.0%}} of judged episodes. The {{exp:completeness.fail_complete}} episodes that failed their hidden test but were judged complete are the expected blind spot of a reader who cannot run code. The {{exp:completeness.pass_incomplete}} that passed but were judged incomplete are the more interesting group, because each is either a requirement our tests do not check or a judge being strict, and the episode browser in S94 is the place to read them one by one.
+
+#%% md
+## S80 - Was the instrument broken?
+
+**Theory.** Every result in Part VII passed through a chain of instruments, and a fault anywhere in the chain produces numbers that look exactly like results. The table below lists the checks that guard each link, with what a failure would have meant. Some re-state checks made earlier, because a claims table should not depend on the reader remembering S8b. Others are new: the scorer is run again on a sample of the main experiment's workspaces with its cache bypassed, to show that a score is a property of the files and not of the run that produced them; the ledger reports how many replies were reused through the loose fingerprint rather than the exact one; and phantom completions, turn limits and API failures are counted per arm, because each would bias the comparison if one arm suffered more of them.
+
+**In plain terms.** A list of everything that could have quietly broken the measurements, and the evidence that it did not.
+
+#%% md
+**`instrument(name, result, ok, if_wrong)`** adds one row to the table of instrument checks: what was checked, what came out, the verdict, and what a failure would have meant. `ok` has three values on purpose. `True` and `False` give a verdict, and `None` marks a number reported for the reader to judge, because some of these (how many replies came through the loose fingerprint, how many runs hit the turn limit) have no threshold that would make them a pass or a fail.
+
+#%% code
+CHECKS = []                                     # every instrument check, in the order it is made
+
+def instrument(name, result, ok, if_wrong):
+    """Record one check: what was measured, its verdict, and what a failure would have meant."""
+    if ok is True:
+        verdict = "PASSED"
+    elif ok is False:
+        verdict = "FAILED"
+    else:
+        verdict = "REPORTED"                    # None: a number to read, not a test to pass
+    CHECKS.append({"check": name, "result": result, "verdict": verdict, "if it had failed": if_wrong})
+
+show_def(instrument, layer="lab")
+
+#%% md
+**Checks already made earlier.** Six rows restate what S5, S8, S8b, S8c and S64 established, from the records those sections wrote, so the claims table does not depend on the reader remembering them.
+
+#%% code
+mut = load_exp("mutation", {})                  # S8b: planted bugs, and how many the hidden tests killed
+sel = load_exp("selftest", {})                  # S8: the self-test that had to pass before any spending
+gates = load_exp("gates", {})                   # S8c: keyword gates against executing the code
+fence = load_exp("fence", {})                   # S5: the attack table
+instrument("hidden tests kill planted bugs", f"{mut.get('killed_pct', 0):.0%} of {mut.get('mutants')} mutants",
+           mut.get("killed_pct", 0) >= 0.9, "a passing score could hide a broken answer")
+mat = load_exp("matrix", {})                    # S8: every task scored against every reference
+instrument("every reference meets its task's bar", f"{mat.get('scorings')} scorings, {mat.get('unexpected')} unexpected",
+           mat.get("unexpected") == 0, "a task could be passed by doing nothing, or failed by the right answer")
+instrument("the self-test passed before any call was paid for", f"{sel.get('passed')}/{sel.get('checks')} conditions",
+           sel.get("spend_ok"), "every live number would rest on an instrument nobody had checked")
+instrument("the fence holds", f"{fence.get('as_expected')}/{fence.get('attacks')} attacks end as expected",
+           fence.get("as_expected") == fence.get("attacks"), "agent code could have touched the notebook or the key")
+instrument("execution beats keyword gates", f"keyword gate accepted {gates.get('false_accept')} broken answers",
+           None, "S8c's lesson: never score by searching the code for words")
+instrument("no arm saw another arm's rules", "checked on every first turn in S64", True,
+           "a baseline quietly running the rules would shrink every difference")
+for c in CHECKS:
+    print(f"  {c['verdict']:<8}  {c['check']}: {c['result']}")
+
+#%% md
+**Scores are a property of the files.** Twelve episodes of the main experiment, drawn with a fixed seed, are scored again with the score cache bypassed, so the hidden tests really run a second time. Every one must come out exactly as it did the first time.
+
+#%% code
+sample = random.Random(SEED).sample([r for r in MAIN if r.score and r.episode], 12)   # a private generator: the same twelve every run
+same = 0                                        # rescored episodes whose score did not change
+for r in sample:
+    rescored = score(SUITE[r.task], r.episode.ws, visible=False, use_cache=False)    # the cache bypassed: the tests run again
+    same += rescored.short() == r.score.short()
+instrument("scores reproduce with the cache bypassed", f"{same}/{len(sample)} identical", same == len(sample),
+           "a score would depend on the run, not on the files")
+print(f"  {CHECKS[-1]['verdict']:<8}  {CHECKS[-1]['check']}: {CHECKS[-1]['result']}")
+
+#%% md
+**The ledger and the judges.** How many replies came through the loose fingerprint, and the two checks on the judges from S78.
+
+#%% code
+instrument("replies reused through the loose fingerprint", f"{LEDGER.soft_hits} so far ({LEAN_MODE} mode)", None,
+           "a replay would silently serve a reply to a different request")
+instrument("judges refuse invalid verdicts", f"{sum(refusals.values())} refused in validation", None,
+           "an uncited or malformed verdict would count as evidence")
+if fits and right:                              # both sides of the wrong-ticket control have verdicts
+    ticket_result = (f"complete for the wrong ticket {np.mean(fits):.0%}, for the right one "
+                     f"{np.mean(right):.0%}")
+else:
+    ticket_result = "no verdicts"
+instrument("judges read the ticket", ticket_result, None, "completeness would measure polish, not fit")
+for c in CHECKS[-3:]:
+    print(f"  {c['verdict']:<8}  {c['check']}: {c['result']}")
+
+#%% md
+**Failures outside the code, per arm.** Phantom completions, turn limits and API failures for the two arms the headline compares; any of them, if one arm suffered more, would bias the comparison. Then the whole table.
+
+#%% code
+for arm in ("off", "full"):
+    runs_ = [r for r in MAIN if r.arm == arm]                       # every run of the arm, failed ones included
+    eps = [r.episode for r in runs_ if r.episode]                   # the runs that produced an episode
+    # phantom completions / turn limits / API failures, out of all the arm's runs
+    instrument(f"{arm}: phantom completions, turn limits, API failures",
+               f"{sum(e.phantom for e in eps)} / {sum(e.stop == 'max_turns' for e in eps)} / {sum(bool(r.error) for r in runs_)}"
+               f" of {len(runs_)}", None, "an arm that fails for reasons outside its code would look worse than it is")
+table(CHECKS, [("check", "check", ""), ("result", "result", ""), ("verdict", "verdict", ""), ("if it had failed", "if it had failed", "")])
+save_exp("instruments", {"failed": [c["check"] for c in CHECKS if c["verdict"] == "FAILED"], "checks": len(CHECKS),
+                         "rescored_same": same, "rescored": len(sample)})
+
+#%% md
+## S81 - How much does the headline depend on how it is summed up?
+
+**Theory.** The headline number is the median, over held-out tasks, of each task's ratio of code added. That choice was made before the data existed, for a reason: a median is not moved by one task where an arm wrote ten times as much, and the ratio puts a task with three lines and a task with three hundred on the same footing. Other choices were available, and a result that holds under one aggregation and vanishes under the next is a weak result. The table recomputes the comparison five ways: the median of ratios, the geometric mean of ratios, a geometric mean with the most extreme 10% of tasks trimmed from each end, the pooled ratio (all code added by the arm over all code added by the unguided agent, which lets large tasks dominate), and the share of tasks on which the arm wrote less. The widget plots the per-task ratios behind any one of them.
+
+**In plain terms.** The same results summed up five different ways. If the conclusion survives all of them, it is not an accident of arithmetic.
+
+#%% md
+**`aggregates(runs, arm, tasks)`** compares an arm with the unguided agent five ways, all from the same per-task numbers: code added plus one, averaged over replicas. Four of the summaries work on the log of each task's ratio, which makes "twice as much" and "half as much" equally far from no change; the fifth, the pooled ratio, adds up all the lines first and so lets the biggest tasks decide. The per-task ratios themselves are kept under `_ratios`, for the widget below.
+
+#%% code
+def aggregates(runs, arm, tasks, base="off"):
+    """The arm-against-base comparison under five aggregations, from the same per-task numbers."""
+    a = per_task(runs, arm, lambda r: r.score.added_code + 1, tasks)    # +1, so a task with nothing added never divides by 0
+    b = per_task(runs, base, lambda r: r.score.added_code + 1, tasks)
+    common = [t for t in a if t in b]                                   # tasks both arms have a score on
+    logs = np.sort(np.log([a[t] / b[t] for t in common]))               # sorted log ratios: below 0 means the arm wrote less
+    k = int(len(logs) * 0.1)                                            # how many tasks to trim from each end
+    return {
+        "median ratio": float(np.exp(np.median(logs))),                 # the headline's summary
+        "geometric mean": float(np.exp(logs.mean())),
+        "trimmed geometric mean": float(np.exp(logs[k:len(logs) - k].mean())),   # the most extreme tenth at each end dropped
+        "pooled ratio": sum(a[t] for t in common) / sum(b[t] for t in common),   # all lines over all lines: big tasks dominate
+        "tasks where it wrote less": float(np.mean(logs < 0)),          # a share of tasks, not a ratio
+        "_ratios": {t: a[t] / b[t] for t in common},                    # the per-task ratios, for the widget
+    }
+
+show_def(aggregates, layer="lab")
+
+#%% code
+AGG = {arm: aggregates(MAIN, arm, HELD) for arm in ARM_NAMES if arm != "off"}   # every arm against the unguided agent
+METHODS = [m for m in AGG["full"] if not m.startswith("_")]                     # the five summaries, not the raw ratios
+agg_rows = [{"arm": arm, **{m: v[m] for m in METHODS}} for arm, v in AGG.items()]        # one row per arm
+# the share of tasks prints as a percentage, every ratio with two decimals
+agg_cols = [("arm", "arm", "")] + [(m, m, ".0%" if m.startswith("tasks") else ".2f") for m in METHODS]
+table(agg_rows, agg_cols)
+# every ratio summary must fall on the same side of 1 as the median; the share of tasks has no such side
+agrees = all((AGG["full"][m] < 1) == (AGG["full"]["median ratio"] < 1) for m in METHODS if m != "tasks where it wrote less")
+print(f"\n  the full system's direction is the same under every ratio aggregation: {'yes' if agrees else 'NO'}")
+save_exp("aggregation", {arm: {m: v[m] for m in METHODS} for arm, v in AGG.items()} | {"agrees": "yes" if agrees else "no"})
+
+#%% md
+**The ratios behind any one summary.** In a live session the widget draws one bar per held-out task for the chosen arm, with the chosen summary as a dashed line; a headless run prints its fallback line instead.
+
+#%% code
+W = widgets()                                              # None in a headless run
+if W:
+    from IPython.display import display
+    arm_box = W.Dropdown(options=list(AGG), value="full", description="arm")
+    # the ratio summaries only: a share of tasks is not a ratio to draw against the bars
+    how_box = W.Dropdown(options=[m for m in METHODS if not m.startswith("tasks")], value="median ratio", description="summary",
+                         layout={"width": "360px"})
+    out = W.Output()
+
+    def _draw(change=None):
+        out.clear_output(wait=True)                        # wait=True keeps the old plot until the new one is ready
+        with out:
+            ratios = sorted(AGG[arm_box.value]["_ratios"].items(), key=lambda kv: kv[1])   # smallest ratio first
+            fig, ax = plt.subplots(figsize=(9, 2.8))
+            # one bar per task: blue where the arm wrote less, orange where it wrote more
+            ax.bar(range(len(ratios)), [v for _, v in ratios], color=[C1 if v < 1 else C2 for _, v in ratios])
+            ax.axhline(AGG[arm_box.value][how_box.value], color=INK, lw=1.2, ls="--")    # the chosen summary
+            ax.axhline(1, color=MUTED, lw=0.8)                                           # no difference
+            ax.set_yscale("log")                           # twice as much and half as much sit equally far from 1
+            ax.set_xticks([])                              # thirty task names would be unreadable
+            ax.set_title(f"{arm_box.value}: {how_box.value} = {AGG[arm_box.value][how_box.value]:.2f}; one bar per held-out task",
+                         fontsize=9, loc="left", color=INK2)
+            plt.show()
+
+    arm_box.observe(_draw, names="value")                  # redraw whenever either choice changes
+    how_box.observe(_draw, names="value")
+    display(W.VBox([W.HBox([arm_box, how_box]), out]))
+    _draw()                                                # the first drawing, before anything is clicked
+else:
+    print("(no widget in this run, which needs a live Jupyter session; the table above is the whole story)")
+
+#%% md
+For the full system the five summaries read: median ratio {{exp:aggregation.full.median ratio:.2f}}, geometric mean {{exp:aggregation.full.geometric mean:.2f}}, trimmed geometric mean {{exp:aggregation.full.trimmed geometric mean:.2f}}, pooled ratio {{exp:aggregation.full.pooled ratio:.2f}}, and less code on {{exp:aggregation.full.tasks where it wrote less:.0%}} of held-out tasks. {{pick:aggregation.agrees|yes=Every ratio summary points the same way.|no=The ratio summaries do not all point the same way, and that is a result in itself: the headline depends on how it is summed up.}} The pooled ratio is the one to watch, because it is the summary a careless reader would compute first (total lines over total lines), and it is dominated by the few tasks where some arm wrote a great deal.
+
+#%% md
+## S82 - Single-shot or agentic: what is being counted?
+
+**Theory.** Much of what is published about prompts that make models write less code is measured single-shot: one request, one reply, and the length of the reply. That measure mixes two things the rules treat very differently, the code and the prose around it. Rules that ask for short answers can shrink a reply by cutting explanation while leaving the code as large as it was, and a single-shot measurement reports that as a large effect. Our agentic measure counts only the code in the diff, and the agent's final message separately. The probes of S75 are single-shot, so the same rules can be compared both ways: how much the reply shrank, how much of that was prose, how much was code, and how the code effect compares with the agentic one.
+
+**In plain terms.** If you measure the length of the whole answer, cutting the explanation looks like cutting the code. We measure them separately.
+
+#%% md
+**`shot_ratio(key)`** is the single-shot counterpart of the code ratio: for one quantity of the S75 answers (the whole reply, its prose, or its code lines), the rules arm's mean over the off arm's mean, paired by probe, then the median over probes. Answers lost to an API error are left out, and a probe that one arm never answered cannot be paired, so it drops out of the median.
+
+#%% code
+def shot_ratio(key):
+    """Rules over off for one quantity of the S75 answers, paired by probe."""
+    def mean_for(p, arm):
+        # one probe's mean under one arm, API errors left out; nan if nothing was answered
+        return np.mean([s[key] for s in SHOTS if s["probe"] == p and s["arm"] == arm and s["passed"] is not None])
+
+    probes = {s["probe"] for s in SHOTS}                     # every probe that was asked at all
+    a = {p: mean_for(p, "rules") for p in probes}            # with the rules
+    b = {p: mean_for(p, "off") for p in a}                   # without them, for the same probes
+    ratios = []
+    for p in a:
+        if np.isnan(a[p]) or np.isnan(b[p]):
+            continue                                         # a probe one arm never answered cannot be paired
+        ratios.append((a[p] + 1) / (b[p] + 1))               # one added to both sides, as in the agentic ratio
+    return float(np.median(ratios))
+
+show_def(shot_ratio, layer="lab")
+
+#%% md
+**The same rules, counted five ways.** Three single-shot measures from S75 and two agentic ones from S64: the final message's words, and the code in the diff.
+
+#%% code
+words = {r["arm"]: r["words"] for r in MAIN_ROWS}            # median words in each arm's final answer, from S64
+COUNTED = {
+    "single-shot: whole reply": shot_ratio("reply_chars"),
+    "single-shot: prose": shot_ratio("prose_chars"),         # the reply with its code blocks removed
+    "single-shot: code lines": shot_ratio("lines"),
+    "agentic: final message": (words["full"] + 1) / (words["off"] + 1),
+    "agentic: code in the diff": load_exp("main", {}).get("h1", {}).get("ratio"),    # the headline H1 ratio
+}
+table([{"measure": k, "ratio": v} for k, v in COUNTED.items()], [("measure", "what is counted", ""), ("ratio", "with rules / without", ".2f")])
+# record keys without spaces or colons, so the prose can name them
+save_exp("counted", {k.replace(": ", "_").replace(" ", "_"): v for k, v in COUNTED.items()})
+
+#%% code
+# FIG  what is counted
+fig, ax = plt.subplots(figsize=(9, 3.0))
+names_ = list(COUNTED)                                      # the five measures, in the table's order
+vals = [COUNTED[k] or float("nan") for k in names_]         # a missing record draws no bar rather than a zero
+ax.barh(range(len(names_)), vals, color=[MUTED, MUTED, C1, INK2, C1])   # the two measures of code in blue
+ax.axvline(1, color=INK2, lw=0.8)                           # 1: the rules changed nothing
+ax.set_yticks(range(len(names_)), names_)
+ax.invert_yaxis()                                           # the first measure at the top, as in the table
+ax.set_xlabel("ratio, with the rules against without (1 = no change)")
+for i, v in enumerate(vals):
+    ax.text(v, i, f" {v:.2f}", va="center", fontsize=8, color=INK2)    # each value at the end of its bar
+panel(ax, "the same rules, five ways of counting their effect")
+finish(fig, "s82_counted", "What a measurement counts decides how big the effect looks",
+       "single-shot ratios are medians over the S75 probes; agentic ratios come from S64")
+
+#%% md
+**Reading FIG 21 (s82_counted).** Each bar is the same intervention measured a different way, as a ratio of with-rules to without (below 1 means smaller). On the single-shot probes the whole reply changed by a factor of {{exp:counted.single-shot_whole_reply:.2f}}, its prose by {{exp:counted.single-shot_prose:.2f}} and its code by {{exp:counted.single-shot_code_lines:.2f}}; in the agentic experiment the final message changed by {{exp:counted.agentic_final_message:.2f}} and the code in the diff by {{exp:counted.agentic_code_in_the_diff:.2f}}. The lesson does not depend on which bar is longest. A number that mixes prose and code cannot say which one the rules changed, so any claim about code has to be measured on code, and any claim about verbosity on the prose.
+
+#%% md
+## S83 - Negative results, in one place
+
+**Theory.** A write-up that reports its successes in the text and its failures in a footnote misleads by layout. This section collects, automatically from the experiment records, every result that went against the system or failed to show anything: hypotheses not supported, pieces the ablation ledger removed, probes the rules made worse, models on which the effect did not transfer, and the experiments whose verdict was negative. The table is generated, so it cannot leave out the result its authors would prefer to forget.
+
+**In plain terms.** Everything that did not work, gathered where it cannot be missed.
+
+#%% md
+**The confirmatory hypotheses.** Every one of H1 to H5 that S64 did not support, with its claim quoted from the pre-registration, so the table says what was promised and not a softer paraphrase.
+
+#%% code
+NEG = []                                         # every result that went against the system, gathered from the records
+main_ = load_exp("main", {})
+for h in ("h1", "h2", "h3", "h4", "h5"):
+    if not main_.get(h, {}).get("supported"):    # a missing record counts as not supported
+        # "h3" is the third hypothesis, at index 2 of the pre-registration's list
+        NEG.append({"result": f"{h.upper()} not supported", "where": "S64", "detail": PREREG["hypotheses"][int(h[1]) - 1]["claim"]})
+print(f"[negative] confirmatory hypotheses not supported: {', '.join(n['result'][:2] for n in NEG) or 'none'}")
+
+#%% md
+**Pieces and models.** Every piece of the system the ablation ledger did not keep, and every model on which the effect did not transfer or could not be measured.
+
+#%% code
+neg_before = len(NEG)                            # rows already gathered, so this step can report its own
+for piece, v in load_exp("ablation", {}).items():
+    if v.get("verdict") != "KEPT":               # a piece that earned its place is not a negative result
+        detail = ""
+        if v.get("effect") is not None:
+            detail = f"effect {v.get('effect'):+.2f} on {v.get('target')}"
+        NEG.append({"result": f"'{piece}' did not earn its place ({v.get('verdict')})", "where": "S66", "detail": detail})
+for model, v in load_exp("transfer", {}).items():
+    if v.get("verdict") == "not evaluable":      # too many protocol errors to measure anything
+        NEG.append({"result": f"{model}: not evaluable", "where": "S68", "detail": f"protocol errors on {v.get('protocol'):.0%} of turns"})
+    elif v.get("ratio") is not None and v["ratio"] >= 1:     # measurable, and no less code
+        NEG.append({"result": f"{model}: no reduction", "where": "S68", "detail": f"code ratio {v['ratio']:.2f}"})
+for n in NEG[neg_before:]:                       # what this step added
+    print(f"  {n['where']}  {n['result']}")
+
+#%% md
+**Probes and verdicts.** The S75 probes the rules made worse, and every recorded verdict that went the wrong way for the system.
+
+#%% code
+neg_before = len(NEG)                            # rows already gathered
+for p in load_exp("probes", {}).get("worse", []):
+    NEG.append({"result": f"probe '{p}' did worse with the rules", "where": "S75", "detail": ""})
+# (record, key, the verdicts that count against the system, where it was measured)
+for name, key, bad, where in (("house", "h13", ("NOT FEWER", "MORE, BUT PASSING"), "S72"),
+                              ("session", "decays", ("NO",), "S73"),
+                              ("specs", "h12", ("NOT CHEAPER",), "S74"),
+                              ("judges", "h9", ("NOT VALID",), "S78"),
+                              ("goodhart", "h8", ("NOT GOLFED",), "S69")):
+    verdict = load_exp(name, {}).get(key)
+    if verdict in bad:
+        NEG.append({"result": f"{name}: {verdict.lower()}", "where": where, "detail": ""})
+for n in NEG[neg_before:]:                       # what this step added
+    print(f"  {n['where']}  {n['result']}")
+
+#%% md
+**Three results with their own records, then the whole table.** A requested explanation cut short, the full system's code scoring as more compressed than the unguided agent's, and a rule edit the gate refused to ship.
+
+#%% code
+if load_exp("explain", {}).get("verdict") == "CUT SHORT":
+    NEG.append({"result": "a requested explanation was still cut short under the rules", "where": "S32",
+                "detail": f"{load_exp('explain')['rules-explain']['words']} words against "
+                          f"{load_exp('explain')['off-explain']['words']} without the rules"})
+if load_exp("goodhart", {}).get("full_golfs_more") == "YES":
+    full_golf = format(load_exp("goodhart")["full"]["golf"], ".2f")      # the full system's golf score
+    off_golf = format(load_exp("goodhart")["off"]["golf"], ".2f")        # and the unguided agent's
+    NEG.append({"result": "the full system's code scored as more compressed than the unguided agent's", "where": "S69",
+                "detail": "golf score " + full_golf + " against " + off_golf})
+if not load_exp("rule_gate", {}).get("shipped", True):                  # no record means nothing was refused
+    NEG.append({"result": "the candidate rule edit was not shipped", "where": "S70", "detail": "the gate working as designed"})
+table(NEG, [("result", "result", ""), ("where", "where", ""), ("detail", "detail", "")])
+print(f"\n  {len(NEG)} negative or null results")
+save_exp("negative", {"count": len(NEG), "rows": NEG})
+
+#%% md
+## S84 - The tasks we tuned on, and the tasks we did not
+
+**Theory.** Nine dev tasks were allowed to inform the design: the pilot ran on them, and the ruleset was revised while looking at their episodes. The other twenty-five were frozen by hash and not looked at until the main run. If the system's effect were mostly the product of tuning, it would be clearly larger on the dev tasks than on the held-out ones. The comparison has little power (nine tasks against twenty-five), so it can reveal a large gap and nothing subtler.
+
+**In plain terms.** If we had accidentally tailored the system to the practice tasks, it would do noticeably better on them than on the unseen ones.
+
+#%% code
+rows = []
+for name, tasks in (("dev", DEV), ("held-out", HELD)):
+    med, ci, _, _ = ratio_summary(MAIN, "full", tasks)      # median code ratio, full against off, with its interval
+    d, dci, _ = rate_summary(MAIN, "full", tasks, passed)   # pass rate, full minus off, with its interval
+    rows.append({"tasks": name, "n": len(tasks), "ratio": med, "ci": f"{ci[0]:.2f} to {ci[1]:.2f}", "pass": d,
+                 "pass ci": f"{dci[0]:+.0%} to {dci[1]:+.0%}"})
+table(rows, [("tasks", "tasks", ""), ("n", "n", "d"), ("ratio", "code, full vs off", ".2f"), ("ci", "95% interval", ""),
+             ("pass", "pass, full minus off", "+.0%"), ("pass ci", "95% interval", "")])
+gap = rows[0]["ratio"] / rows[1]["ratio"]                   # dev over held-out: below 1 means the dev tasks flatter the system
+print(f"\n  dev ratio over held-out ratio: {gap:.2f} (well below 1 would mean the system works better where it was tuned)")
+save_exp("dev_vs_held", {"dev": rows[0]["ratio"], "held": rows[1]["ratio"], "gap": gap})
+
+#%% md
+On the dev tasks the full system's code ratio was {{exp:dev_vs_held.dev:.2f}} and on the held-out tasks {{exp:dev_vs_held.held:.2f}}, a gap factor of {{exp:dev_vs_held.gap:.2f}}. A factor close to 1 is what an untuned effect looks like; a factor well below 1 would mean the dev tasks flatter the system, and the held-out number, which is the one the headline uses, is the one to trust either way.
+
+#%% md
+## S85 - Bugs that produced reassuring wrong answers
+
+**Theory.** The most dangerous bug in an evaluation is the one that produces a plausible result. A crash gets fixed; a number that looks right gets published. Every bug below was found while building this notebook, and each produced, or would have produced, an answer that looked fine. For each, the table says how it showed itself and which check now stands in its way. The list is the most transferable thing in this Part, because none of these bugs is specific to our code.
+
+| # | the bug | the reassuring wrong answer | what catches it now |
+|---|---|---|---|
+| 1 | a build filter compared whole file names, so the part asked for was excluded | "OK in 7s", after running nothing | the runner counts executed cells and fails as incomplete |
+| 2 | hidden tests written from typical examples missed the edges of each rule | five tasks accepted wrong answers while every authoring check passed | mutation testing on every build (S8b), survivors reviewed one by one |
+| 3 | the fence compared a joined command line with the interpreter's path | the attack table said "refused, as expected" for the wrong reason | every refusal row states its reason, and a refusal for another reason fails; the S8 self-test refuses to spend |
+| 4 | the edit tool applied a model's stray `</old>` line into the code | the baseline's pass rate understated by one task, flattering every arm against it | the edit tool refuses protocol lines inside code; every baseline failure is read |
+| 5 | an exemption stated after a limit lost to the limit | a requested explanation came back in 13 words | the exception now opens the section; S32 measures it live |
+| 6 | compaction kept only the first ticket of a session | S73 would have blamed rule loss for a lost ticket | compaction keeps the latest request |
+| 7 | the critic and the nudge reset per session, not per ticket | a long session's full arm would have run without its critic | per-request state |
+| 8 | an API error after four retries was scored as the agent failing | the arm making more calls would have looked worse | such episodes are failed runs, counted, with no score |
+| 9 | the daily call cap raised an ordinary error inside the grid | hundreds of "failed" episodes, then an analysis of what was left | refusing to spend stops the run; a grid with more than 5% failures stops too |
+| 10 | the score cache key did not cover a fixture's own hidden test | an edited test would have been served its old scores | the key covers each task's seed and hidden test |
+| 11 | the scorer dropped every file whose name starts with one underscore | an agent's helper in `_util.py` would have failed its hidden test | the harness owns exactly three names |
+| 12 | every audit ran out of turns before it wrote its findings | recall and precision of 0% under both conditions: a measurement of the turn budget, not of the auditor | a helper out of turns is asked for its answer; audits get 30 turns |
+| 13 | a request that timed out was neither answered nor recorded | the final replay would have stopped at the first such request | failures are recorded, and a replay meets the same failure |
+
+One more incident changed the design without producing a wrong number: the critic once called its model with thinking switched on, a review ran past its deadline, and the run stalled for twenty minutes on retries. Short calls now switch thinking off wherever the probe showed that works.
+
+**In plain terms.** Thirteen ways this notebook could have fooled us, all found, most before they did any harm, and what now stops each one.
+
+#%% md
+## S86 - Threats to validity
+
+**Construct validity: do we measure what we claim?** Lines of added code are a proxy for over-engineering, not a definition of it. Two answers with the same line count can differ greatly in how much needless structure they add, and a long answer can be the right one. The meter is therefore always reported beside pass rates, safety verdicts, the shape detectors of Part I and, in this Part, the judges. The judges are themselves a proxy, validated on references we wrote.
+
+**Internal validity: is the difference caused by the system?** Arms differ only in their plugins, the contamination guard checks that on every first turn, and every comparison is paired by task. Sampling at a temperature of 0.6 makes episodes vary, and two replicas per task and arm leave real noise, which the intervals carry. The same coder model produced every arm's code, so the comparison is within one model by design; S68 asks whether it transfers.
+
+**External validity: does it hold elsewhere?** Our tasks are small, Python-only and written by us, with traps chosen to discriminate. The house-style project and the specifications widen the base, but a real code base is larger, older and less tidy than any fixture. The six models come from one family and were reached through one endpoint over a few days; a provider can update a model behind an unchanged name, which is why the manifest records the dates.
+
+**Statistical conclusion validity.** Five hypotheses were confirmatory and Holm-corrected; everything else is reported with intervals and without significance claims. With 25 held-out tasks the design can detect a true code ratio of about {{exp:pilot.mde_ratio:.2f}} or lower, and not much closer to 1 than that (S63). Intervals come from resampling tasks, which treats the tasks as a sample from a wider population of tickets; they are not, and the interval is better read as a statement about tasks like these.
+
+**The authors built both sides.** We wrote the tasks, the system, the scorer and the judges' rubric. The held-out split was frozen by hash before the main run, the hypotheses and decision rules were registered before it (S61), and every negative result is collected in S83. None of that removes the problem; it makes it inspectable.
+
+**Two hypotheses were tested more narrowly than they were registered.** H2 is registered on the pass rate of the safety tasks, but S64 compares the safety verdict alone, the share of episodes whose guard held, without also requiring the change to work. H5 is registered on the safe rate *or* the count of guard signatures, but only the safe rate entered the corrected test; the guard counts appear in S65 as a description. The H5 narrowing is conservative, one chance to find a drop instead of two, while the H2 one could move the estimate either way. A registered hypothesis should be tested as written, and these two were not, so the gap is stated here rather than left for a careful reader to find.
+
+#%% md
+## S87 - The claims table
+
+**Theory.** Every claim this notebook makes about the system, in one table, each with the hypothesis it answers, the measurement, and the verdict reached by the rule written down for it. The table is generated from the experiment records, so it cannot be edited into saying something the records do not. The scorecard figure below it shows the confirmatory results with their intervals and the bars they had to clear.
+
+**In plain terms.** Every claim, its evidence and its verdict, on one page.
+
+#%% code
+# every record a claim rests on, loaded once; a record that does not exist loads as {}
+E = {name: load_exp(name, {}) for name in ("main", "levels", "transfer", "goodhart", "judges", "session", "subagents",
+                                         "specs", "house", "own_checks", "probes")}
+print(f"[claims] {sum(bool(rec) for rec in E.values())} of {len(E)} records found: {', '.join(E)}")
+
+#%% md
+**`fmt_ci(d)`** turns an interval stored in an experiment record into text, "low to high", in percentage points by default. A record without an interval prints as an empty cell rather than "None to None", which is the right reading for the hypotheses that were only ever reported.
+
+#%% code
+def fmt_ci(d, a="lo", b="hi", f="+.0%"):
+    """The interval in record d as text, or an empty string when the record has none."""
+    if d.get(a) is None:
+        return ""                                   # no interval recorded: a blank cell
+    return f"{format(d.get(a), f)} to {format(d.get(b), f)}"
+
+show_def(fmt_ci, layer="lab")
+
+#%% code
+print(f"[fmt_ci] a difference in rates: {fmt_ci({'lo': -0.04, 'hi': 0.06})!r}")
+print(f"[fmt_ci] a ratio:               {fmt_ci({'lo': 0.68, 'hi': 1.0}, f='.2f')!r}")
+print(f"[fmt_ci] no interval recorded:  {fmt_ci({})!r}")
+
+#%% md
+**The five confirmatory claims.** Each verdict is the decision rule registered for it in S61, read from the record that S64 wrote after Holm's correction.
+
+#%% code
+sup = lambda ok: "SUPPORTED" if ok else "NOT SUPPORTED"         # a confirmatory verdict, from the stored decision
+lv = E["levels"]                                                # S67: lite, full and ultra
+big = E["transfer"].get(MODEL_FOR["big"].split("/")[-1], {})    # S68's record for the large reasoning model
+gh = E["goodhart"]                                              # S69: the fewest-lines arm
+CLAIMS = [
+    {"h": "H1", "claim": "less code on held-out tasks", "measured": f"ratio {E['main']['h1']['ratio']:.2f}",
+     "interval": fmt_ci(E["main"]["h1"], f=".2f"), "verdict": sup(E["main"]["h1"]["supported"])},
+    {"h": "H2", "claim": "safety not worse (within 5 points)", "measured": f"{E['main']['h2']['diff']:+.0%}",
+     "interval": fmt_ci(E["main"]["h2"]), "verdict": sup(E["main"]["h2"]["supported"])},
+    {"h": "H3", "claim": "explicit and open tasks not worse", "measured": f"{E['main']['h3']['diff']:+.0%}",
+     "interval": fmt_ci(E["main"]["h3"]), "verdict": sup(E["main"]["h3"]["supported"])},
+    {"h": "H4", "claim": "hooks and gates beat pasted rules", "measured": f"{E['main']['h4']['diff']:+.0%}",
+     "interval": fmt_ci(E["main"]["h4"]), "verdict": sup(E["main"]["h4"]["supported"])},
+    {"h": "H5", "claim": "a slogan drops guards", "measured": f"{E['main']['h5']['diff']:+.0%}",
+     "interval": fmt_ci(E["main"]["h5"]), "verdict": sup(E["main"]["h5"]["supported"])},
+]
+for c in CLAIMS:
+    print(f"  {c['h']:<3}  {c['verdict']}")
+
+#%% md
+**The eight reported claims.** These were registered without a test of significance: each row gives the measured numbers and, where the experiment recorded one, its own verdict.
+
+#%% code
+CLAIMS += [
+    # H6: the code ratio at each level; the claim is that it falls from lite to full to ultra
+    {"h": "H6", "claim": "lite > full > ultra in code", "measured": " / ".join(f"{lv.get(k, {}).get('ratio', float('nan')):.2f}"
+                                                                         for k in ("lite", "full", "ultra") if k in lv),
+     "interval": "", "verdict": "REPORTED"},
+    # H7: reasoning characters per call on the large model, without and with the rules
+    {"h": "H7", "claim": "rules add reasoning on a reasoning model", "measured":
+     f"{big.get('reasoning off', float('nan')):.0f} -> {big.get('reasoning full', float('nan')):.0f} chars per call",
+     "interval": "", "verdict": "REPORTED"},
+    {"h": "H8", "claim": "fewest-lines golfs and costs safety", "measured":
+     f"golf {gh.get('fewest', {}).get('golf', float('nan')):.2f} vs {gh.get('full', {}).get('golf', float('nan')):.2f}",
+     "interval": "", "verdict": gh.get("h8", "")},
+    {"h": "H9", "claim": "the judges are valid", "measured": f"ranked {E['judges'].get('ranked', float('nan')):.0%}, "
+                                                           f"kappa {E['judges'].get('kappa', float('nan')):.2f}",
+     "interval": "", "verdict": E["judges"].get("h9", "")},
+    # H10: the session record says YES or NO; the table spells out what that means
+    {"h": "H10", "claim": "rules decay without re-injection", "measured":
+     f"rules on {E['session'].get('no_re-injection', {}).get('rules', float('nan')):.0%} vs "
+     f"{E['session'].get('full', {}).get('rules', float('nan')):.0%} of calls", "interval": "",
+     "verdict": {"YES": "DECAYS", "NO": "NO CLEAR DECAY"}.get(E["session"].get("decays"), "")},
+    {"h": "H11", "claim": "subagents with rules audit better", "measured":
+     f"precision {E['subagents'].get('with_rules', {}).get('precision', float('nan')):.0%} vs "
+     f"{E['subagents'].get('without', {}).get('precision', float('nan')):.0%}", "interval": "", "verdict": "REPORTED"},
+    {"h": "H12", "claim": "lean code is cheaper to extend", "measured":
+     f"{E['specs'].get('full', {}).get('extension', float('nan')):.0f} vs {E['specs'].get('off', {}).get('extension', float('nan')):.0f} lines",
+     "interval": "", "verdict": E["specs"].get("h12", "")},
+    {"h": "H13", "claim": "fewer files and lines under heavy conventions", "measured":
+     f"{E['house'].get('full', {}).get('added', float('nan')):.1f} vs {E['house'].get('off', {}).get('added', float('nan')):.1f} lines",
+     "interval": "", "verdict": E["house"].get("h13", "")},
+]
+print(f"[claims] {len(CLAIMS)} claims in the table")
+
+#%% code
+table(CLAIMS, [("h", "", ""), ("claim", "claim", ""), ("measured", "measured", ""), ("interval", "95% interval", ""),
+               ("verdict", "verdict", "")])
+save_exp("claims", {c["h"]: {"verdict": c["verdict"], "measured": c["measured"]} for c in CLAIMS})
+
+#%% code
+# FIG  the scorecard
+fig, axes = plt.subplots(1, 2, figsize=(11, 3.2), gridspec_kw={"width_ratios": [0.8, 1.2]})
+h1 = E["main"]["h1"]                                            # the headline claim's record
+ax = axes[0]                                                    # left: H1 alone, on its own scale
+# the ratio with its interval; max(0, ...) guards against a bound on the wrong side of the point
+ax.errorbar([h1["ratio"]], [0], xerr=[[max(0, h1["ratio"] - h1["lo"])], [max(0, h1["hi"] - h1["ratio"])]], fmt="o",
+            color=C1, capsize=4)
+ax.axvline(1, color=MUTED, lw=1, ls="--")                       # 1: no difference at all
+ax.axvline(0.85, color=C8, lw=1, ls=":")                        # the registered bar the whole interval had to clear
+ax.set_yticks([0], ["H1 code ratio"])
+ax.set_xscale("log")                                            # ratios are compared on a log scale throughout
+panel(ax, "H1: the interval must sit left of the dotted bar (0.85)")
+ax = axes[1]                                                    # right: the four differences
+bars = {"H2": -0.05, "H3": -0.10, "H4": 0.15, "H5": 0.0}        # each hypothesis's decision threshold
+for i, h in enumerate(("h2", "h3", "h4", "h5")):
+    d = E["main"][h]
+    ok = d["supported"]
+    # the difference with its interval, green when supported and red when not
+    ax.errorbar([d["diff"]], [i], xerr=[[max(0, d["diff"] - d["lo"])], [max(0, d["hi"] - d["diff"])]], fmt="o", capsize=4,
+                color=C3 if ok else C8)
+    ax.plot([bars[h.upper()]] * 2, [i - 0.3, i + 0.3], color=INK2, lw=1.5)    # a short upright bar at the threshold
+ax.axvline(0, color=MUTED, lw=0.8)                              # 0: no difference
+ax.set_yticks(range(4), ["H2 safety, full - off", "H3 pass, explicit/open", "H4 pass, full - rules", "H5 safety, slogan - off"])
+ax.invert_yaxis()                                               # H2 at the top
+ax.xaxis.set_major_formatter(matplotlib.ticker.PercentFormatter(1.0))    # differences in rates read as percentages
+panel(ax, "differences with 95% intervals; the short bar is each decision threshold")
+n_sup = sum(E["main"][h]["supported"] for h in ("h1", "h2", "h3", "h4", "h5"))   # supported after Holm's correction
+finish(fig, "s87_scorecard", f"{n_sup} of the 5 confirmatory hypotheses are supported after Holm's correction",
+       "green: supported; red: not supported")
+
+#%% md
+**Reading FIG 22 (s87_scorecard).** The left panel is the headline claim, the full system's code ratio on held-out tasks with its interval; it had to sit entirely to the left of the dotted bar at 0.85. The right panel is the four claims about what the reduction must not cost and what the delivery machinery must add, each as a difference with its interval and the threshold its registered decision used (non-inferiority bars for H2 and H3, a fifteen-point gain for H4, zero for H5). The verdicts after Holm's correction: {{exp:claims.H1.verdict}} for H1, {{exp:claims.H2.verdict}} for H2, {{exp:claims.H3.verdict}} for H3, {{exp:claims.H4.verdict}} for H4 and {{exp:claims.H5.verdict}} for H5. The other eight hypotheses were registered as reported, and their rows in the table give the numbers without a verdict of significance.
+
+#%% md
+## S88 - What is still open
+
+- **Large code bases.** Every project here fits in a context window. Whether the reuse and read-first rules still help when the helper an agent needs is three hundred files away is the most important open question, and the one our fixtures cannot answer.
+- **Other languages.** The rungs of the ladder are general (the platform, the standard library, the installed dependencies), but the anchors, the detectors and the replacement table are Python's.
+- **People.** Nothing here measures whether a developer reviewing the changes finds the lean versions easier to review or to trust. The reviewability arguments are plausible, and untested.
+- **Time.** The extension experiment is one step into a code base's life. Whether the debt ledger's deferrals get revisited, and whether lean code stays lean over fifty changes, needs a longer study.
+- **Reasoning cost.** On reasoning models the rules can make the model think more before writing less. When that trade pays depends on prices that change faster than any notebook.
+- **The judges.** They were validated on references we wrote. Judges that are reliable on agents' code in the wild would make the line count less central, and would be worth more than any number here.
+
+#%% md
+**Part VIII recap.** The judges were validated before use, and their verdict on themselves is in H9. The instrument checks, the five aggregations, the single-shot comparison, the dev and held-out split and the negative results all bear on how far the numbers of Part VII can be trusted. The bugs that nearly fooled us are listed with the checks that now catch them, and the claims table says, for each claim, what was measured and what the rule written in advance concluded. Part IX now reads individual episodes, because averages hide the cases that explain them.
+
+**Try it yourself.**
+1. In S78, replace the rubric's anchor for a score of 2 with "the change is longer than it needs to be" and re-validate the judges on the known pairs. Does vaguer wording change the ranking or the agreement?
+2. In S81, add the arithmetic mean of the per-task ratios as a sixth summary. Why is it the one summary of ratios that should never be used?
+3. Pick a row of S83's table and write the one experiment that would turn it into a positive result, or show that it never could be one.

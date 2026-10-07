@@ -1,0 +1,14 @@
+{
+  "id": "rc-day-parse",
+  "title": "Accept dates without leading zeros",
+  "category": "root-cause",
+  "split": "dev",
+  "axis": "quality",
+  "rung": 7,
+  "entry": "bookings/window.py",
+  "requirements": [],
+  "python_target": "3.12",
+  "prompt": "Bug report: `booking_window('2026-3-7', '2026-3-9')` in bookings/window.py crashes with ValueError. Customers type dates without leading zeros, like 2026-3-7. Fix it.",
+  "notes": "bookings/dates.parse_day is shared with cancel.cancel_deadline. The root-cause fix is in parse_day; the lazy-wrong fix pads the strings inside booking_window only.",
+  "extension": "Also accept dates written with slashes, like 2026/3/7."
+}

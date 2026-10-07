@@ -1,0 +1,36 @@
+{
+  "edge": {
+    "off": 1.0,
+    "rules": 1.0,
+    "off lines": 9.6458,
+    "rules lines": 7.3958
+  },
+  "everyday": {
+    "off": 0.9667,
+    "rules": 0.9333,
+    "off lines": 9.2667,
+    "rules lines": 4.7667
+  },
+  "interface": {
+    "off": 0.8333,
+    "rules": 0.9167,
+    "off lines": 23.75,
+    "rules lines": 13.6667
+  },
+  "calibration": {
+    "off": 0.0,
+    "rules": 1.0,
+    "off lines": 6.0,
+    "rules lines": 8.0
+  },
+  "better": [
+    "postcode check",
+    "sensor"
+  ],
+  "worse": [
+    "uk date"
+  ],
+  "n_better": 2,
+  "n_worse": 1,
+  "errors": 0
+}

@@ -1,0 +1,22 @@
+stateDiagram-v2
+    direction LR
+    state "🌳 full" as full
+    state "🌱 lite" as lite
+    state "🔥 ultra" as ultra
+    state "⏸️ off" as off
+    [*] --> full: the saved default
+    full --> lite: /lean lite
+    lite --> full: /lean full
+    full --> ultra: /lean ultra
+    ultra --> full: /lean full
+    full --> off: /lean off
+    off --> full: /lean on
+    note right of lite
+        only a prompt that is the whole command counts
+    end note
+    note right of ultra
+        an unknown option such as /lean extreme changes nothing
+    end note
+    note right of off
+        the next prompt tells the model the rules no longer apply
+    end note

@@ -1,0 +1,18 @@
+flowchart TB
+    %%STYLES%%
+    subgraph R1[" "]
+        direction LR
+        J["⚖️ <b>S78 judges</b><br/>blinded · cited<br/>validated"]:::plum --> C["✅ <b>S79 completeness</b>"]:::lab --> I["🔧 <b>S80 was the<br/>instrument broken?</b>"]:::lab --> A["🧮 <b>S81 aggregation</b>"]:::lab
+    end
+    subgraph R2[" "]
+        direction LR
+        SS["🎯 <b>S82 single-shot<br/>or agentic</b>"]:::lab --> N["❌ <b>S83 negative<br/>results</b>"]:::warn --> HD["🧊 <b>S84 held-out<br/>and dev tasks</b>"]:::lab --> B["🐛 <b>S85 reassuring<br/>wrong answers</b>"]:::warn
+    end
+    subgraph R3[" "]
+        direction LR
+        T["⚠️ <b>S86 threats<br/>to validity</b>"]:::gold --> CL["📋 <b>S87 the claims table</b>"]:::plugin --> O["❓ <b>S88 still open</b>"]:::grey
+    end
+    R1 --> R2 --> R3
+    style R1 fill:none,stroke:none
+    style R2 fill:none,stroke:none
+    style R3 fill:none,stroke:none

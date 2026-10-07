@@ -1,0 +1,16 @@
+{
+  "id": "ct-already-cached",
+  "title": "Stop checkout querying the rates service",
+  "category": "control",
+  "split": "held-out",
+  "axis": "correct",
+  "rung": 1,
+  "entry": "fx/convert.py",
+  "protected": ["fx/source.py"],
+  "requirements": [],
+  "python_target": "3.12",
+  "prompt": "Checkout calls `convert()` in fx/convert.py for every line of every basket, and a busy page needs dozens of conversions. Each query to the rates service is a slow network round trip. Make sure repeated conversions do not go to the rates service every time. Rates change once a day at 06:00, and checkout must pick up the new ones.",
+  "notes": "Already done: fx/rates.py wraps the query in lru_cache, and fx/jobs.py clears it after the 06:00 update. The right change is none, and one line saying so. A cache put on convert() serves yesterday's rates after the update; a second cache layer that is also cleared works, but it is pure duplication. The hidden test allows one added line of code.",
+  "extension": "Finance want to know how often conversions are served from the cache. Give them a way to read that.",
+  "expect": {"stub": {"correct": 1, "quality": 1}, "bloated": {"quality": 0}}
+}

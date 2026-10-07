@@ -1,0 +1,39 @@
+flowchart TB
+    %%STYLES%%
+    T["🎫 <b>a ticket</b><br/>go down the list · the first step that does the job wins"]:::grey --> R1
+    subgraph R1["rung 1 · nothing"]
+        direction LR
+        S1{{"1️⃣ is it needed at all?"}}:::gold -- "no" --> N1["🙅 <b>build nothing</b><br/>and say so in one line"]:::plugin
+    end
+    subgraph R2["rung 2 · this project"]
+        direction LR
+        S2{{"2️⃣ does this project have it?"}}:::gold -- "yes" --> N2["♻️ <b>reuse it</b><br/>look before you write"]:::plugin
+    end
+    subgraph R3["rung 3 · the standard library"]
+        direction LR
+        S3{{"3️⃣ in the standard library?"}}:::gold -- "yes" --> N3["🐍 functools · argparse · zoneinfo<br/>in the declared Python version"]:::plugin
+    end
+    subgraph R4["rung 4 · the platform"]
+        direction LR
+        S4{{"4️⃣ does the platform do it?"}}:::gold -- "yes" --> N4["🗄️ a database constraint · an HTTP status<br/>an HTML attribute · a CSS rule"]:::plugin
+    end
+    subgraph R5["rung 5 · declared packages"]
+        direction LR
+        S5{{"5️⃣ a package already declared?"}}:::gold -- "yes" --> N5["📦 <b>use it</b><br/>no new dependency"]:::plugin
+    end
+    subgraph R6["rung 6 · one expression"]
+        direction LR
+        S6{{"6️⃣ can one expression do it?"}}:::gold -- "yes" --> N6["✏️ <b>write the expression</b>"]:::plugin
+    end
+    R1 -- "yes, it is needed" --> R2
+    R2 -- "no" --> R3
+    R3 -- "no" --> R4
+    R4 -- "no" --> R5
+    R5 -- "no" --> R6
+    R6 -- "no" --> N7["🧱 <b>rung 7 · the smallest new code that works</b>"]:::host
+    style R1 fill:#fffdf5,stroke:#eda100
+    style R2 fill:#fffdf5,stroke:#eda100
+    style R3 fill:#fffdf5,stroke:#eda100
+    style R4 fill:#fffdf5,stroke:#eda100
+    style R5 fill:#fffdf5,stroke:#eda100
+    style R6 fill:#fffdf5,stroke:#eda100

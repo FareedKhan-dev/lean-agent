@@ -1,0 +1,14 @@
+{
+  "trigger": {
+    "precision": 1.0,
+    "recall": 1.0,
+    "false alarms": 0,
+    "missed": 0
+  },
+  "summary": {
+    "precision": 0.9375,
+    "recall": 0.75,
+    "false alarms": 1,
+    "missed": 5
+  }
+}

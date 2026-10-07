@@ -1,0 +1,13 @@
+flowchart TB
+    %%STYLES%%
+    subgraph R1[" "]
+        direction LR
+        a["⚙️ <b>S0 setup</b><br/>parameters · folders<br/>house style"]:::grey --> b["🧬 <b>S1 specimens</b><br/>same behaviour,<br/>very different size"]:::lab --> c["📏 <b>S2 bloat meter</b><br/>code · prose<br/>checks · tests"]:::lab --> d["🔎 <b>S3 detectors</b><br/>ten shapes in<br/>the syntax tree"]:::lab
+    end
+    subgraph R2[" "]
+        direction LR
+        e["⛳ <b>S3b golf detector</b><br/>short is not the goal"]:::warn --> f["🛡️ <b>S3c guard signatures</b><br/>what must never be cut"]:::plugin --> g["📚 <b>S3d replacement table</b><br/>every row tested"]:::host
+    end
+    R1 --> R2
+    style R1 fill:none,stroke:none
+    style R2 fill:none,stroke:none

@@ -1,0 +1,6 @@
+flowchart LR
+    %%STYLES%%
+    lite["🌱 <b>lite</b><br/>build what the ticket asks,<br/>then name anything smaller<br/>in one line"]:::plugin
+    full["🌳 <b>full</b><br/>go down the ladder and stop<br/>at the first step that<br/>does the job"]:::host
+    ultra["🔥 <b>ultra</b><br/>start by asking what can be<br/>deleted; a doubtful requirement<br/>gets its smallest version"]:::warn
+    lite -- "stronger" --> full -- "stronger" --> ultra

@@ -1,0 +1,64 @@
+{
+  "rows": [
+    {
+      "task": "ob-postcode-cache",
+      "answer": "good",
+      "findings": 1,
+      "lean already": "no",
+      "hedged": 0,
+      "claimed net": 2,
+      "touches a guard": 0,
+      "first finding": "geo.py: the `@cache` decorator and its import - `postcode` is an [...]"
+    },
+    {
+      "task": "ob-postcode-cache",
+      "answer": "bloated",
+      "findings": 4,
+      "lean already": "no",
+      "hedged": 0,
+      "claimed net": 42,
+      "touches a guard": 0,
+      "first finding": "`enable_stats` flag and the two counter attributes - no caller [...]"
+    },
+    {
+      "task": "sf-share-link",
+      "answer": "good",
+      "findings": 1,
+      "lean already": "yes",
+      "hedged": 0,
+      "claimed net": 0,
+      "touches a guard": 0,
+      "first finding": "sharing/links.py: remove the `int(expires_at)` conversion and [...]"
+    },
+    {
+      "task": "sf-share-link",
+      "answer": "bloated",
+      "findings": 4,
+      "lean already": "no",
+      "hedged": 0,
+      "claimed net": 16,
+      "touches a guard": 0,
+      "first finding": "sharing/links.py: remove the `ShareLinkService` class and its [...]"
+    },
+    {
+      "task": "ob-member-unique",
+      "answer": "good",
+      "findings": 0,
+      "lean already": "yes",
+      "hedged": 0,
+      "claimed net": 0,
+      "touches a guard": 0,
+      "first finding": "-"
+    },
+    {
+      "task": "ob-member-unique",
+      "answer": "bloated",
+      "findings": 12,
+      "lean already": "no",
+      "hedged": 0,
+      "claimed net": 191,
+      "touches a guard": 1,
+      "first finding": "members.py: `MemberError`, `DuplicateMemberError`, [...]"
+    }
+  ]
+}

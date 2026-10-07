@@ -1,0 +1,54 @@
+{
+  "H1": {
+    "verdict": "NOT SUPPORTED",
+    "measured": "ratio 0.88"
+  },
+  "H2": {
+    "verdict": "SUPPORTED",
+    "measured": "+0%"
+  },
+  "H3": {
+    "verdict": "SUPPORTED",
+    "measured": "+0%"
+  },
+  "H4": {
+    "verdict": "NOT SUPPORTED",
+    "measured": "+0%"
+  },
+  "H5": {
+    "verdict": "NOT SUPPORTED",
+    "measured": "+0%"
+  },
+  "H6": {
+    "verdict": "REPORTED",
+    "measured": "1.00 / 0.90 / 0.93"
+  },
+  "H7": {
+    "verdict": "REPORTED",
+    "measured": "1521 -> 1593 chars per call"
+  },
+  "H8": {
+    "verdict": "NOT GOLFED",
+    "measured": "golf 0.29 vs 0.32"
+  },
+  "H9": {
+    "verdict": "VALID",
+    "measured": "ranked 100%, kappa 0.92"
+  },
+  "H10": {
+    "verdict": "DECAYS",
+    "measured": "rules on 79% vs 100% of calls"
+  },
+  "H11": {
+    "verdict": "REPORTED",
+    "measured": "precision 91% vs 92%"
+  },
+  "H12": {
+    "verdict": "CHEAPER",
+    "measured": "11 vs 35 lines"
+  },
+  "H13": {
+    "verdict": "MORE, BUT PASSING",
+    "measured": "5.2 vs 2.7 lines"
+  }
+}

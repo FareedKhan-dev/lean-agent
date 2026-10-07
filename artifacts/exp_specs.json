@@ -1,0 +1,29 @@
+{
+  "off": {
+    "build": 45.3333,
+    "extension": 35.3333,
+    "all_pass": 4,
+    "runs": 6
+  },
+  "full": {
+    "build": 38.5,
+    "extension": 10.6667,
+    "all_pass": 4,
+    "runs": 6
+  },
+  "h12": "CHEAPER",
+  "good": {
+    "events": {
+      "build": 25,
+      "extension": 8
+    },
+    "ledger": {
+      "build": 24,
+      "extension": 11
+    },
+    "auth": {
+      "build": 29,
+      "extension": 2
+    }
+  }
+}

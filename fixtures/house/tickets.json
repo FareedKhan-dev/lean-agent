@@ -1,0 +1,8 @@
+[
+  {"id": "h1-count", "prompt": "Support wants to see how many orders a customer has placed. Add `count_for(customer_id)` to OrderService."},
+  {"id": "h2-csv", "prompt": "Finance needs a CSV export of all orders: add `export_csv(path)` to OrderService, writing one row per order with the columns order id, customer email and total in pence, plus a header row."},
+  {"id": "h3-email", "prompt": "Customers sign in with their email address typed in any case. `CustomerService.find_by_email(email)` must find them regardless of case."},
+  {"id": "h4-quantity", "prompt": "An order line with a quantity of zero or less must be rejected when the order is placed, with a ValueError."},
+  {"id": "h5-recent", "prompt": "The account page needs the customer's five most recent orders. Add a handler `recent_orders(customer_id)` in api/handlers.py returning them newest first, in the same form as `list_orders`."},
+  {"id": "h6-vat", "prompt": "Orders must show their total including 20% VAT: add `Order.total_with_vat()` returning whole pence, rounding halves up."}
+]

@@ -1,0 +1,1169 @@
+#%% md
+# Part IV - Plugin I: the ruleset
+
+What we ask a model to do decides more than any machinery we build around it, so the words come first.
+
+**Where this sits.** The host from Part III runs any agent; this Part writes the first piece of the plugin that turns it into *our* agent: a ruleset of about seven hundred tokens that tells a model how to decide what to build, how to build it, what never to cut, how to prove it and how to answer. Every rule exists to counter one specific way agents over-build (the causal model in the front matter), and every rule has a counterweight, because a ruleset that only says "write less" produces code that is short and wrong. Each section below is a **feature card**: what the rule is for and how it works, the code that checks it, its tests, and the same ticket run with the rule and without it. One run per side is an illustration, not evidence; the evidence is the ablation ledger in Part VII, where each rule is removed in turn across the whole suite and kept only if removing it does measurable harm.
+
+**By the end of this Part you can** write rules for a model as a procedure with a stopping point rather than as a value, keep one source of truth for several levels of strictness, pair every "do less" with the guard that stops it going too far, check from a diff whether an agent did what it claims, and measure how well a one-line description decides when a skill applies.
+
+{{diagram:part4_map}}
+
+#%% md
+## S24 - One source, three levels
+
+**Theory.** The rules exist at three strengths. **Lite** builds what is asked and names a leaner option afterwards; it suits a user who wants to stay in charge. **Full** runs the whole procedure. **Ultra** starts from deletion and challenges doubtful requirements in the same reply it meets them. Writing three separate texts would guarantee that they drift apart, so there is **one source** in which a line can carry a label saying which levels it belongs to (`{full,ultra}`) and a caret marking it as *core* (`^`), meaning it belongs in every copy, including the compact copy that subagents get. The filter that turns the source into a level is structural: it reads the label at the start of the line and nothing else. That sounds like a detail until you see the alternative fail. A filter that drops "lines mentioning another level" is the kind of shortcut that passes a quick look, and it silently deletes the rule *"if they ask for the full version, build it"* from two of the three levels, because the word *full* appears in it. The tests further down show it.
+
+The ruleset also has a **budget**, because it is not free: it travels with every model call, so each extra sentence is paid for on every turn of every episode. The budget per level is asserted, and a rule that wants to be added has to fit.
+
+**In plain terms.** One text, three strengths, a filter that cannot misread a rule, and a size limit the rules themselves must obey.
+
+#%% md
+The source comes first. A line may start with a label in braces naming the levels it belongs to, and a line without one belongs to every level. A caret marks a core line, one the compact copy keeps as well. Whatever follows the label and the caret is exactly what the model reads.
+
+#%% code
+# the one text every copy of the rules is cut from; the functions below filter it and never edit it
+RULESET_SOURCE = r"""
+^# Proportional code
+^You will maintain whatever you write, so every line you add is one you may have to debug at a bad moment. Write the least code that does the job completely: fewer lines, never less care.
+
+{lite} ## What to build
+{lite} Build what the ticket asks for, completely. After the code, if something smaller would have done, name it in one line.
+
+{full,ultra} ## What to build: the ladder
+{full,ultra} Before writing code, go down this list and stop at the first step that does the job:
+{full,ultra} 1. Nothing. A need nobody has yet is a guess you would have to maintain; leave it out and say so in one line.
+{full,ultra} 2. Code this project already has. Look before you write: rebuilding a helper that sits a few files away is the commonest waste.
+{full,ultra} 3. The standard library, in the Python version the project declares (check requires-python before using anything newer).
+{full,ultra} 4. The platform: a database constraint, an HTTP status code, an HTML attribute, a CSS rule.
+{full,ultra} 5. A package the project already depends on. Never add a dependency for what a few lines can do.
+{full,ultra} 6. One expression.
+{full,ultra} 7. The smallest new code that works.
+{full,ultra} When two steps would both work, take the earlier one. Decide quickly: the first step that holds is the answer, and comparing designs is not part of the job.
+{full,ultra} Do not speed up what nobody has measured: no cache, pool or batch until a number asks for it.
+{ultra} Start by asking what can be deleted. Meet a requirement you doubt by building its smallest version and naming what you left out, in the same reply.
+
+^## Read first
+^The less you mean to write, the more carefully you read: open the files the ticket touches and the code that calls them before changing anything.
+^Fix a bug where it starts. Search for every caller of the function you change: one guard in the shared function is a smaller change than a guard in each caller, so the root cause is also the cheapest fix. A two-line fix in the wrong place is a second bug report waiting to happen.
+
+{full,ultra} ## How to build
+{full,ultra} Do not add an abstract class with one subclass, a factory that makes one thing, a setting for a value that never changes, a parameter no caller passes, or a function that only calls another.
+{full,ultra} Add code for the ticket in front of you; a later ticket can add what it needs when it comes.
+{full,ultra} Prefer deleting to adding, changing a file to creating one, one file to several.
+{full,ultra} Write code a tired colleague can read: short is good, cryptic is not.
+{full,ultra} When a sturdier algorithm costs a line or two more, pay it.
+{full,ultra} A value that depends on the physical world (a timeout, a threshold, a sensor offset) gets a name even if it is used once: someone will tune it.
+
+^## Never cut
+^These are never bloat, however many lines they take:
+^- checks where untrusted input arrives (forms, files, network, environment) and where data leaves (responses, logs, HTML)
+^- handling for errors that would lose or corrupt data
+^- security: paths, queries, signatures, escaping, permissions
+^- accessibility basics: labels, alt text
+^- anything the user explicitly asked for. If they ask for the full version, build it without arguing again.
+
+^## Prove it
+^Leave one runnable check that fails if the code is wrong: a few asserts under `if __name__ == "__main__":` or one small test file. A test suite is a feature of its own; build one only when asked.
+
+{full,ultra} ## Shortcuts
+{full,ultra} If you knowingly take a shortcut with a real limit, mark it where it lives:
+{full,ultra}     # shortcut: <the limit>; upgrade when <the condition>
+{full,ultra} Only for real limits, not for every simplification.
+
+^## How to answer
+^If the user asks a question or asks for an explanation, the answer is the deliverable: give all of it in your final message, at the length it needs. The limits below are for prose nobody asked for.
+^Otherwise, code first. Then at most three short lines: what you did, and for each thing you chose not to build, `left out: <what> (build it when <condition>)`.
+{full,ultra} Begin those lines with the step you stopped at, for example `step 3: functools.cache`.
+{full,ultra} Do not wait for answers you can assume: pick the sensible default, build it, and say which one you picked.
+^An unrequested paragraph defending a choice is more for someone to read, not less.
+
+^These rules hold for every reply in this session that touches code, until the user switches them off. They are about the code you produce, not your tone.
+"""
+# its size before any filtering: every level is cut from these lines
+print(f"[rules] the source: {len(RULESET_SOURCE.strip().splitlines())} lines, {len(RULESET_SOURCE.strip())} characters")
+
+#%% md
+Three constants turn the source into levels: the level names, the token budget each level must fit, and `_LINE`, the pattern that reads a line's label. The pattern is anchored at the start of the line and stops after the caret, so nothing a rule *says* can change where it goes.
+
+#%% code
+LEVELS = ("lite", "full", "ultra")                          # from the lightest push to the strongest
+TOKEN_BUDGET = {"lite": 520, "full": 1000, "ultra": 1080}   # the most each level may cost, paid on every call
+# group 1: the optional {level,level} label; group 2: the optional ^ core mark; group 3: the words the model reads
+_LINE = re.compile(r"^(?:\{([a-z,]+)\} ?)?(\^?)(.*)$")
+
+# four lines in the shapes the source uses, split the way ruleset() will split them
+for sample_line in ("^## Never cut", "{full,ultra} 6. One expression.", "{lite} ## What to build", ""):
+    sample_levels, sample_core, sample_text = _LINE.match(sample_line).groups()   # None means no label: every level
+    # an empty caret group means the line is not core; the text is what a model would read
+    print(f"  {sample_line!r:<35} levels {sample_levels or 'all':<10} core {bool(sample_core)!s:<5}  text {sample_text!r}")
+
+#%% md
+**`ruleset(level, core_only, drop)`** cuts one copy of the rules out of the source, and what it returns is the exact text a model receives, so it is the function in this Part that must never change by accident. It walks the source line by line and keeps a line when its label names the level or when it has no label at all. `drop` removes whole sections whose heading starts with a given name, which is how Part VII takes out one rule at a time, and `core_only` keeps only the caret lines, which gives the compact copy for subagents and the critic. Skipped lines leave runs of blank lines behind, so the last step squeezes each run back to one blank line.
+
+#%% code
+def ruleset(level="full", core_only=False, drop=()):
+    """The ruleset for one level. core_only keeps only lines marked ^ (the compact copy);
+    drop removes whole sections by heading, which is how Part VII's ablations are made."""
+    out = []                                                # the lines this copy keeps, in source order
+    skipping = False                                        # true from a dropped section's heading to the next heading
+    for raw in RULESET_SOURCE.strip().splitlines():         # strip() drops the newlines around the triple quotes
+        levels, core, text = _LINE.match(raw).groups()      # the label, the caret, and the words the model reads
+        if levels and level not in levels.split(","):       # labelled, and not for this level
+            continue
+        if text.startswith("## "):                          # a heading opens a section
+            # skip the whole section if its title starts with a dropped name
+            skipping = any(text[3:].lower().startswith(d.lower()) for d in drop)
+        if skipping:                                        # inside a dropped section, heading included
+            continue
+        if core_only and not core and text.strip():         # the compact copy keeps core lines and the blanks between them
+            continue
+        out.append(text)                                    # kept, without its label or caret
+    joined = "\n".join(out)                                 # one text again
+    # skipped lines leave runs of blank lines behind; three or more newlines become one blank line
+    return re.sub(r"\n{3,}", "\n\n", joined).strip()
+
+show_def(ruleset, layer="plugin")
+
+#%% md
+**`tokens_of(text)`** estimates what a text costs as its length in characters divided by four. Each model here has its own tokenizer, and a budget that needed six of them would be a budget nobody checks; one rough rule, applied the same way to every copy, is enough to compare copies and to hold each level to its limit.
+
+#%% code
+def tokens_of(text):
+    return len(text) // 4                                   # about four characters per token in English prose
+
+show_def(tokens_of, layer="plugin")
+
+#%% md
+Every copy, measured: lines, words, tokens against the budget, and sections. The compact copy has no budget of its own, because it is only ever the core lines.
+
+#%% code
+rows = []                                                   # one row per copy of the rules
+for level in LEVELS:
+    text = ruleset(level)                                   # exactly what this level sends with every call
+    rows.append({"level": level,                            # the copy's name in the table
+                 "lines": len([l for l in text.splitlines() if l.strip()]),   # non-blank lines only
+                 "words": len(text.split()),                # whitespace-separated words
+                 "tokens": tokens_of(text),                 # what it costs on every call
+                 "budget": TOKEN_BUDGET[level],             # what it is allowed to cost
+                 "sections": len(re.findall(r"^## ", text, re.M))})          # each "## " heading opens a section
+compact_copy = ruleset("full", core_only=True)              # the core lines that subagents and the critic receive
+rows.append({"level": "compact",                            # measured the same way as the levels
+             "lines": len([l for l in compact_copy.splitlines() if l.strip()]),
+             "words": len(compact_copy.split()),
+             "tokens": tokens_of(compact_copy),
+             "sections": len(re.findall(r"^## ", compact_copy, re.M))})     # no budget key: the table shows a dash
+# one column per measure; "d" prints a whole number, "" prints the text as it is
+table(rows, [("level", "copy", ""), ("lines", "lines", "d"), ("words", "words", "d"), ("tokens", "about tokens", "d"),
+             ("budget", "budget", "d"), ("sections", "sections", "d")])
+
+#%% code
+print("The full level, exactly as the model reads it:\n")
+print(textwrap.indent(ruleset("full"), "    "))           # indented so the rules stand apart from the notebook's own text
+
+#%% md
+The invariants are the phrases no copy may lose: the never-cut list, the explicit-request rule, fixing a bug at its cause, the one check, and the exemption for explanations. S34 checks every generated copy against this list, word for word.
+
+#%% code
+INVARIANTS = [   # phrases every copy must carry word for word; S34 checks every copy against them
+    "checks where untrusted input arrives",                              # never cut: trust boundaries
+    "handling for errors that would lose or corrupt data",               # never cut: data safety
+    "security: paths, queries, signatures, escaping, permissions",       # never cut: security
+    "accessibility basics",                                              # never cut: accessibility
+    "anything the user explicitly asked for",                            # never cut: the user's own request
+    "If they ask for the full version, build it without arguing again.", # the explicit-request rule
+    "Fix a bug where it starts.",                                        # read first: fix it at the cause
+    "Leave one runnable check",                                          # prove it
+    "the answer is the deliverable: give all of it in your final message",   # how to answer: explanations in full
+]
+print(f"[rules] {len(INVARIANTS)} invariant phrases; every copy must contain each one exactly")
+
+#%% md
+**`naive_level(level)`** is the shortcut filter, kept only as a counter-example. It drops any line whose raw text mentions another level's name anywhere, label or not, which looks equivalent to reading the label and is not: a rule that merely contains the word *full* vanishes from the levels it was written for. Nothing in the system calls it; the tests below run it beside `ruleset` to show what it would have cost.
+
+#%% code
+def naive_level(level):
+    """The shortcut filter: keep a line unless it mentions another level by name."""
+    others = [l for l in LEVELS if l != level]              # the level names this copy should not contain
+    kept = []                                               # the words of every line that survives
+    for raw in RULESET_SOURCE.strip().splitlines():
+        # a plain substring test on the whole line, label included: this is the bug
+        if not any(o in raw.lower() for o in others):
+            kept.append(_LINE.match(raw).group(3))          # the words, without label or caret
+    return "\n".join(kept)
+
+show_def(naive_level, layer="lab")
+
+#%% md
+The tests: no label syntax may leak into what a model reads, every level carries every invariant and fits its budget, each level differs from full only where it should, and dropping a section removes that section and nothing else.
+
+#%% code
+results = []                                                # expect() records each check here
+for level in LEVELS:
+    text = ruleset(level)                                   # the copy under test
+    # a leftover "{full,ultra}" or "^" at the start of a line would mean the filter is broken
+    expect(f"{level}: no label syntax leaks into the text", not re.search(r"^\{[a-z,]+\}|^\^", text, re.M))
+    expect(f"{level}: every invariant is present", all(p in text for p in INVARIANTS))   # word for word
+    # the budget is checked on every run, so a rule that grows past it fails here first
+    expect(f"{level}: within its budget ({tokens_of(text)} of {TOKEN_BUDGET[level]} tokens)",
+           tokens_of(text) <= TOKEN_BUDGET[level])
+# each level's own line appears in that level and not in full
+expect("only lite builds first and names the leaner option after",
+       "Build what the ticket asks for" in ruleset("lite") and "Build what the ticket asks for" not in ruleset("full"))
+# ultra's extra line is about deleting first
+expect("only ultra starts from deletion", "what can be deleted" in ruleset("ultra") and "what can be deleted" not in ruleset("full"))
+# the compact copy is cut by the caret alone, and still has to keep every invariant
+expect("the compact copy keeps every invariant", all(p in ruleset("full", core_only=True) for p in INVARIANTS))
+# the dropped section's heading is gone, and the section after it is still there
+expect("dropping a section removes it and nothing else",
+       "## Never cut" not in ruleset("full", drop=("Never cut",)) and "## Prove it" in ruleset("full", drop=("Never cut",)))
+
+#%% md
+The same invariants, checked against what the shortcut filter would have produced:
+
+#%% code
+lost = {}                                                   # level: the invariant phrases the shortcut filter drops
+for level in LEVELS:
+    lost[level] = [p for p in INVARIANTS if p not in naive_level(level)]   # what the shortcut would have lost here
+print("\n  the shortcut filter, for comparison:")
+for level, missing in lost.items():
+    print(f"    {level:<6} loses {missing or 'nothing'}")    # an empty list prints as "nothing"
+save_exp("ruleset", {lv["level"]: lv["tokens"] for lv in rows}           # tokens per copy, from the table above
+         | {"invariants": len(INVARIANTS),                              # how many phrases each copy must keep
+            "naive_losses": sum(len(m) for m in lost.values())})        # every phrase the shortcut filter would lose
+
+#%% md
+The shortcut filter fails in the way that matters most: it strips the explicit-request rule, a guard against the system's own bias, from the lite and ultra levels, because the sentence contains the word *full*. Nothing would look broken; the levels would simply stop honouring "build me the whole thing" in two of three settings. The structural filter and the invariant check exist because this class of bug is invisible until a user hits it.
+
+#%% md
+## S25 - What to build: the ladder
+
+**Theory.** Telling a model "keep it simple" changes little, because a model asked to be simple and a model asked to be thorough both believe they are being reasonable. What changes behaviour is a **procedure with a stopping point**: seven steps, ordered from cheapest to dearest (nothing, code the project already has, the standard library, the platform, an installed package, one expression, new code), and the instruction to stop at the first step that does the job. The first step counters the urge to be complete ("a need nobody has yet is a guess you would have to maintain"); the second counters blindness to the code base; the third and fourth counter gaps in recall, where the model writes what the standard library or the database already does; the fifth forbids new dependencies for small jobs. Two tie-breakers remove the deliberation that procedures can otherwise cause: take the earlier step, and decide quickly. Two clauses guard the steps themselves: check the Python version the project declares before reaching for a newer library function (a trap in `eg-target-runtime`), and do not optimise what nobody has measured.
+
+A procedure also gives us something to check. The rules ask the agent to name the step it stopped at, and `rung_evidence` reads the diff to see what the change actually leans on: a project helper it did not call before, a standard-library module, a platform feature such as a `UNIQUE` constraint, a package. A claim of an early step is believed only if the evidence shows that resource *and* the change is small, because "the standard library did it" does not describe forty lines of classes.
+
+**In plain terms.** Before writing code, the agent checks seven cheaper options in order and takes the first that works. Then it says which one it used, and we check the claim against the diff.
+
+**The ladder, one rung per band.** The agent stops at the first rung that does the job, and when two rungs would both work, the earlier one wins. Rung 7, new code, is reached only after six cheaper answers have been ruled out.
+
+{{diagram:ladder}}
+
+#%% md
+Two patterns read the evidence. `PLATFORM` recognises code that leans on the platform: a database constraint or index, a member of `HTTPStatus`, an HTML input with a type. `STEP_CLAIM` finds the step an answer says it stopped at, and accepts only the seven real steps.
+
+#%% code
+# step 4's evidence: SQL constraints and indexes, HTTPStatus members, an <input> with a type attribute
+PLATFORM = re.compile(r"\b(UNIQUE|CHECK\s*\(|COLLATE|REFERENCES|CREATE\s+INDEX|PRIMARY\s+KEY)\b|HTTPStatus\.|<input[^>]+type=", re.I)
+STEP_CLAIM = re.compile(r"\bstep\s*([1-7])\b", re.I)       # "step 3", "Step 3:" or "step3"; "step 8" is no claim at all
+
+# two lines that lean on the platform and one that does not
+for platform_sample in ("email TEXT NOT NULL UNIQUE", "return HTTPStatus.NOT_FOUND", "rates = cache.get(key)"):
+    print(f"  platform feature: {bool(PLATFORM.search(platform_sample))!s:<5}  in {platform_sample!r}")
+# the claim is read from the answer's own words, in any letter case
+print(f"  the step claimed in 'Step 3: functools.cache': {STEP_CLAIM.search('Step 3: functools.cache').group(1)}")
+
+#%% md
+**`_code_added(before, after)`** returns the code lines a change added to one file: the lines the diff marks as new, keeping only those Part I's classifier labels as code. Comments and docstrings are left out on purpose. The evidence is about what a change *does*, and a long comment on a one-line fix should not make the fix look big.
+
+#%% code
+def _code_added(before, after):
+    labels = classify_lines(after)                          # blank, comment, docstring or code, one label per line
+    lines = after.splitlines()                              # the same lines the labels describe
+    return [lines[i] for i in added_lines(before, after) if labels[i] == "code"]   # the new lines that are code
+
+show_def(_code_added, layer="plugin")
+
+#%% code
+demo_before = "def lookup(code):\n    return REGISTER.get(code)\n"   # a one-function file
+# the same file with a cache: an import, a decorator and a comment are new
+demo_after = ("from functools import cache\n\n@cache\ndef lookup(code):\n"
+              "    # the register never changes while we run\n    return REGISTER.get(code)\n")
+print(f"[evidence] code lines added: {_code_added(demo_before, demo_after)}")   # the comment and the blank line are not
+
+#%% md
+**`_imports(src)`** maps every name a file's imports bring into scope to the top-level module it comes from: `import numpy as np` gives `np` from `numpy`, and `from json import loads` gives `loads` from `json`. The evidence needs the name as well as the module, because a change only counts as leaning on a module if its *added* code uses a name that module provides. Relative imports are skipped, since they are the project's own code, and a file that does not parse gives an empty map rather than an error.
+
+#%% code
+def _imports(src):
+    """name -> top-level module, for every name the source's imports bring in."""
+    out = {}                                                # name in the file: the module it came from
+    try:
+        tree = ast.parse(src)                               # the syntax tree, so strings and comments cannot fool it
+    except SyntaxError:                                     # a half-edited file: no imports we can trust
+        return out
+    for n in ast.walk(tree):                                # every node, so imports inside functions count too
+        if isinstance(n, ast.Import):                       # "import x" or "import x.y as z"
+            for a in n.names:                               # one statement can import several modules
+                # "import os.path" binds os and "import numpy as np" binds np; the module is the top package
+                out[(a.asname or a.name).split(".")[0]] = a.name.split(".")[0]
+        elif isinstance(n, ast.ImportFrom) and n.module and n.level == 0:   # level 0: absolute, not relative
+            for a in n.names:                               # each name the statement brings in
+                out[a.asname or a.name] = n.module.split(".")[0]          # "from a.b import c" binds c, from a
+    return out
+
+show_def(_imports, layer="plugin")
+
+#%% code
+# a plain import, an aliased one, a from-import and a relative import, which is skipped
+imports_sample = "import os.path\nimport numpy as np\nfrom json import loads\nfrom . import utils\n"
+print(f"[evidence] names and their modules: {_imports(imports_sample)}")
+
+#%% md
+**`_safe_parse(src)`** is `ast.parse` that answers `None` instead of raising when the source does not parse. Agents do leave half-edited files behind, and a reader of evidence that crashed on one would lose the whole comparison; with `None`, a broken file simply contributes nothing. Later Parts use it for the same reason.
+
+#%% code
+def _safe_parse(src):
+    try:
+        return ast.parse(src)                               # a module node for any file that parses
+    except SyntaxError:                                     # broken code defines nothing anyone can call
+        return None
+
+show_def(_safe_parse, layer="plugin")
+
+#%% code
+# one source that parses and one that stops half way through a definition
+print(f"[evidence] 'x = 1' parses to a {type(_safe_parse('x = 1')).__name__}; 'def f(:' gives {_safe_parse('def f(:')}")
+
+#%% md
+**`_module_kind(module, local)`** places an imported module on the ladder: the project's own code (step 2), the standard library of the running Python (step 3), or anything else, which has to be an installed package (step 5). The project's own modules are checked first, so a project file that shares its name with a standard module still counts as the project's.
+
+#%% code
+def _module_kind(module, local):
+    """Where an imported module comes from: the project, the standard library, or an installed package."""
+    if module in local:                                     # step 2: code the project already has
+        return "project"
+    if module in sys.stdlib_module_names:                   # step 3: the standard library of this Python
+        return "stdlib"
+    return "package"                                        # step 5: anything else is a dependency
+
+show_def(_module_kind, layer="plugin")
+
+#%% code
+for module_name in ("register", "functools", "requests"):   # one of each kind, for a project of geo.py and register.py
+    print(f"  {module_name:<10} {_module_kind(module_name, {'geo', 'register'})}")
+
+#%% md
+**`_helpers_elsewhere(seed, path)`** collects the names of the functions and classes defined at the top level of every *other* Python file in the seed. These are the helpers step 2 of the ladder asks the agent to look for, so a change that starts calling one of them is leaning on code the project already had. A file that does not parse contributes nothing, thanks to `_safe_parse`.
+
+#%% code
+def _helpers_elsewhere(seed, path):
+    """Names of the functions and classes defined at the top level of the seed's other Python files."""
+    names = set()                                           # every helper name found so far
+    for q, s in seed.items():                               # each file of the seed, by path
+        if not q.endswith(".py") or q == path:              # only the project's other source files
+            continue
+        for n in getattr(_safe_parse(s), "body", []):       # an unparseable file has no body to read
+            if isinstance(n, (ast.FunctionDef, ast.ClassDef)):   # top-level definitions only: what another file can call
+                names.add(n.name)
+    return names
+
+show_def(_helpers_elsewhere, layer="plugin")
+
+#%% code
+demo_seed = {   # a two-file project in the shape of the postcode task
+    # geo.py looks a district up through the register
+    "geo.py": "from register import scan\n\ndef lookup_district(postcode):\n    return scan(postcode)\n",
+    # register.py already has a normalise() that geo.py does not use yet
+    "register.py": "def scan(code):\n    return DISTRICTS.get(code)\n\ndef normalise(code):\n    return code.upper().replace(' ', '')\n",
+}
+print(f"[evidence] helpers geo.py could call: {sorted(_helpers_elsewhere(demo_seed, 'geo.py'))}")   # sorted: a set has no order
+
+#%% md
+**`rung_evidence(seed, final)`** reads, from the code a change added, what that change leans on: a module of the project, the standard library, an installed package, a helper from another project file that the file did not call before, or a platform feature; and how many code lines it added. Only changed Python files count, and test files are left out, because a test is the check rather than the change. The claim an agent makes about its step is judged against this, never against what the agent says it did.
+
+#%% code
+def rung_evidence(seed, final):
+    """What a change leans on, read from the code it added: a project helper it did not
+    call before, a standard-library module, the platform, a package; and its size."""
+    # the source files the change touched; a test file is the check, not the change
+    changed = {p: s for p, s in final.items() if p.endswith(".py") and s != seed.get(p) and not is_test_file(p)}
+    local = {p.split("/")[0].removesuffix(".py") for p in seed}   # the project's own module and package names
+    kinds = set()                                           # what the added code leans on
+    for p, src in changed.items():                          # one changed file at a time
+        before = seed.get(p, "")                            # "" for a file the change created
+        new = "\n".join(_code_added(before, src))           # only the code lines this change added
+        for name, module in _imports(src).items():          # every name the file's imports provide
+            if re.search(rf"\b{re.escape(name)}\b", new):   # an imported name the new code actually uses
+                kinds.add(_module_kind(module, local))      # project, stdlib or package
+        for h in _helpers_elsewhere(seed, p):               # helpers defined in the project's other files
+            call = rf"\b{re.escape(h)}\s*\("                # the helper's name, then an opening bracket
+            if re.search(call, new) and not re.search(call, before):   # called now, and not called before
+                kinds.add("project")                        # reused code the project already had
+                break
+        if PLATFORM.search(new):                            # a constraint, a status code or an input type
+            kinds.add("platform")
+    # the size of the change: code lines added, summed over every changed file
+    lines = sum(len(_code_added(seed.get(p, ""), s)) for p, s in changed.items())
+    return {"kinds": kinds, "lines": lines, "changed": bool(changed)}
+
+show_def(rung_evidence, layer="plugin")
+
+#%% md
+Three changes to that small project show the instrument at work: one adds a standard-library cache, one starts calling a helper from `register.py`, and one changes nothing at all.
+
+#%% code
+demo_changes = {   # change name: the project's files after that change
+    # step 3: functools.cache, two added lines
+    "adds functools.cache": {**demo_seed, "geo.py": "from functools import cache\nfrom register import scan\n\n"
+                                                    "@cache\ndef lookup_district(postcode):\n    return scan(postcode)\n"},
+    # step 2: register.normalise was already there, and now geo.py calls it
+    "calls register.normalise": {**demo_seed, "geo.py": "from register import normalise, scan\n\n"
+                                                        "def lookup_district(postcode):\n    return scan(normalise(postcode))\n"},
+    "changes nothing": demo_seed,                           # step 1: the files are the seed's own
+}
+for change_name, change_files in demo_changes.items():
+    demo_ev = rung_evidence(demo_seed, change_files)        # read from the diff, not from any claim
+    # what the change leans on, how big it is, and whether it changed anything
+    print(f"  {change_name:<26} leans on {sorted(demo_ev['kinds']) or '-'}, {demo_ev['lines']} code lines, "
+          f"changed: {demo_ev['changed']}")
+
+#%% md
+**`supports(step, ev)`** decides whether the evidence backs a claim to have stopped at a given step. Each step needs its own resource in the diff: no change at all for step 1, the project's own code for step 2, the standard library for 3, the platform for 4, a package for 5, at most one line for 6, and anything for 7. Steps 2 to 6 must also be small, at most `EARLY_STEP_LINES` lines of code, because "the standard library did it" does not describe forty lines of classes that happen to import `functools`.
+
+#%% code
+EARLY_STEP_LINES = 12      # a claim of steps 2 to 6 is believed only for a change this small
+
+def supports(step, ev):
+    """Does the evidence back a claim to have stopped at `step`?"""
+    needs = {1: not ev["changed"],                          # nothing: the change changed nothing
+             2: "project" in ev["kinds"],                   # code the project already has
+             3: "stdlib" in ev["kinds"],                    # the standard library
+             4: "platform" in ev["kinds"],                  # the platform
+             5: "package" in ev["kinds"],                   # an installed package
+             6: ev["lines"] <= 1,                           # one expression
+             7: True}                                       # new code: any change will do
+    resource = needs.get(step, False)                       # no claim, or a step that does not exist, is never supported
+    # the resource must be there, and an early step must also be a small change
+    return resource and (step in (1, 7) or ev["lines"] <= EARLY_STEP_LINES)
+
+show_def(supports, layer="plugin")
+
+#%% code
+cache_ev = rung_evidence(demo_seed, demo_changes["adds functools.cache"])   # stdlib, two lines
+big_ev = {"kinds": {"stdlib"}, "lines": 40, "changed": True}   # forty lines of classes that also import functools
+# a claim the evidence backs, one it does not, and the size limit turning down a claim the resource alone would pass
+for claim_step, claim_ev, claim_what in ((3, cache_ev, "the functools.cache change"), (2, cache_ev, "the same change"),
+                                         (3, big_ev, "forty lines importing functools"), (7, big_ev, "the same forty lines")):
+    print(f"  step {claim_step} for {claim_what}: {'supported' if supports(claim_step, claim_ev) else 'not supported'}")
+
+#%% md
+**`claimed_step(text)`** reads the step an answer says it stopped at: the number in the first "step N" it contains, or `None` when it names none. The search does not care where in the answer the claim sits, because the claim is checked against the diff either way.
+
+#%% code
+def claimed_step(text):
+    m = STEP_CLAIM.search(text or "")                       # a missing answer reads as an empty one
+    if m:                                                   # the answer names a step
+        return int(m.group(1))                              # the first "step N" in the answer
+    return None
+
+show_def(claimed_step, layer="plugin")
+
+#%% code
+# a claim in the contract's format, an answer that names no step, and no answer at all
+for answer_text in ("step 3: functools.cache on lookup_district", "Added a cache.", None):
+    print(f"  {answer_text!r:<46} claims step {claimed_step(answer_text)}")
+
+#%% md
+Before the instrument judges an agent, it has to agree with the task authors. Every task declares the step its good answer stops at; the evidence read from the good answer must support that step, and the same claim made for the bloated answer should mostly fail.
+
+#%% code
+# ---- is the instrument right? the good answers' declared steps must be supported --
+rows = []                                                   # one row per task
+good_ok = 0                                                 # good answers whose declared step the evidence supports
+bloat_ok = 0                                                # bloated answers that would get away with the same claim
+for t in SUITE.values():
+    if (t.folder / "refs" / "good").is_dir():               # most tasks have a good reference
+        ev_good = rung_evidence(t.seed, snapshot(WS_DIR / f"{t.id}-good"))   # the good reference, laid over the seed in Part II
+    else:
+        ev_good = rung_evidence(t.seed, t.seed)             # no good reference: the right change is no change
+    ev_bloat = rung_evidence(t.seed, snapshot(WS_DIR / f"{t.id}-bloated"))   # the bloated reference, the same way
+    g = supports(t.rung, ev_good)                           # the declared step, for the good answer
+    b = supports(t.rung, ev_bloat)                          # the same step, claimed for the bloated answer
+    good_ok += g                                            # True counts as one
+    bloat_ok += b
+    # one table row: what each answer leans on, how big it is, and whether the claim holds
+    rows.append({"task": t.id, "step": t.rung, "good leans on": ", ".join(sorted(ev_good["kinds"])) or "-",
+                 "good lines": ev_good["lines"], "good": "yes" if g else "NO", "bloated lines": ev_bloat["lines"],
+                 "bloated": "yes" if b else "no"})
+print(f"[instrument] evidence read for the good and the bloated answer of {len(rows)} tasks")
+
+#%% code
+# a "NO" in the claim column would mean the instrument disagrees with a task's author
+table(rows, [("task", "task", ""), ("step", "declared step", "d"), ("good leans on", "good answer leans on", ""),
+             ("good lines", "lines", "d"), ("good", "claim supported", ""), ("bloated lines", "bloated lines", "d"),
+             ("bloated", "same claim, bloated", "")])
+print(f"\n  the declared step is supported for {good_ok}/{len(SUITE)} good answers and for {bloat_ok}/{len(SUITE)} "
+      f"bloated ones (mostly tasks whose step is 7, which any change supports)")
+save_exp("rung_check", {"good_supported": good_ok, "bloated_supported": bloat_ok, "tasks": len(SUITE)})   # for the prose
+
+#%% md
+**A note on the one task that disagreed while this section was built.** The first version of this table found a single good answer whose declared step its own evidence did not support: `ob-tags-dedupe` had been declared step 3 ("the standard library"), but its good answer is a four-line loop around `str.casefold`, which needs no import. The evidence was right and the declaration was wrong; the task now declares step 7. An instrument that disagrees with its author is worth listening to before it is "fixed".
+
+#%% md
+**`StaticRules`** is the simplest possible plugin: it places one fixed text in the system message at every session start, compaction included, the way a rules file pasted into a project would sit there. It has no other hooks, no gates and no skills, which makes it the *rules-only* arm of Part VII and the base of every card in this Part: whatever difference a card shows comes from the words alone.
+
+#%% code
+# ---- the rules-only arm: a text in the system message, and nothing else -------------
+class StaticRules:
+    """Place a text in the system message at every session start (compaction included, as a
+    static rules file would be). No other hooks, no gates, no skills: this is the
+    rules-only arm of Part VII, and the base of every demo in this Part."""
+
+    def __init__(self, text, name="rules"):
+        self.text = text                                    # the words, placed exactly as given
+        self.name = name                                    # the hook's name in the bus's health report
+
+    def install(self, host):
+        # every session_start (startup, resume, clear and compact); the bus passes the session's
+        # details as keywords, and this hook needs none of them
+        def give_rules(**_):
+            return {"section": "rules", "text": self.text, "rank": 20}   # rank 20: after the project file, before skills
+        host.bus.on("session_start", give_rules, name=self.name)        # the one hook this plugin has
+
+show_def(StaticRules, layer="plugin")
+
+#%% code
+static_host = Host(plugins=[StaticRules("Write the least code that does the job.")], label="demo")   # one short rule
+# a fresh copy of the postcode seed, kept under the demo folder
+static_host.start_session(materialise(SUITE["ob-postcode-cache"], RUNTIME / "demo" / "static-rules"))
+print(f"[static] sections after a session start: {list(static_host.ctx.sections)}")
+static_host.compact()                                       # drops every section but the host's, then fires session_start
+print(f"[static] after compaction: {list(static_host.ctx.sections)} (compactions: {static_host.ctx.compactions})")
+
+#%% md
+**`arm_host(arm, text)`** builds the host for one arm of a card: no plugin at all when the arm has no text (the `off` arm), otherwise one `StaticRules` carrying that text. The arm's name becomes the host's label, which names the folder its episodes are kept in, so two arms of the same ticket never share a workspace.
+
+#%% code
+def arm_host(arm, text=None):
+    """A host for one arm: no plugin, or one static text."""
+    plugins = [StaticRules(text)] if text else []           # the off arm has no text, so no plugin at all
+    return Host(plugins=plugins, label=arm)                 # the label names the arm's episode folder and tags
+
+show_def(arm_host, layer="plugin")
+
+#%% code
+for arm_name, arm_text in (("off", None), ("rules", ruleset("full"))):   # the two arms of the first card
+    arm_demo = arm_host(arm_name, arm_text)                 # built only; no session, no model
+    # which plugins the host carries, and which hooks wait for session_start
+    print(f"[arm] {arm_name:<5} plugins {[type(p).__name__ for p in arm_demo.plugins]}, "
+          f"session_start hooks {[h.name for h in arm_demo.bus.hooks['session_start']]}")
+
+#%% md
+**`run_arms(task, arms, prompt)`** runs one ticket under several arms at the same time and returns each arm's episode. The arms run in parallel threads because an episode spends most of its time waiting for a model. Every card's episodes are also kept in `PART4_EPISODES`, so S29 can check all of their final messages against the output contract; a run with a replacement prompt, such as the explanation probe in S32, is a question rather than a ticket and stays out of that list.
+
+#%% code
+PART4_EPISODES = []                                         # every card episode of this Part, for S29 and Part VI's debt ledger
+
+def run_arms(task, arms, prompt=None):
+    """Run one task under several arms at once: {arm: text or None} -> {arm: Episode}."""
+    def run_one(item):
+        arm, text = item                                    # one arm's name and its rules (None: no plugin)
+        return run_episode(task, arm_host(arm, text), prompt=prompt)   # a fresh host and workspace per arm
+    with ThreadPoolExecutor(len(arms)) as pool:             # one thread per arm; they mostly wait on the model
+        eps = dict(zip(arms, pool.map(run_one, arms.items())))   # map returns results in the arms' order
+    if prompt is None:                                      # a real ticket, not a question
+        PART4_EPISODES.extend(eps.values())                 # kept for the contract check in S29
+    return eps
+
+show_def(run_arms, layer="plugin")
+
+#%% md
+**`seed_diff(task, final, arm)`** lists the unified-diff lines from a task's seed to a finished workspace, for every Python file the change touched apart from test files. The file headers carry the arm's name, so when two arms' diffs are printed one after the other, every hunk says whose it is.
+
+#%% code
+def seed_diff(task, final, arm):
+    """Unified-diff lines from the seed to `final`, for every changed Python file that is not a test."""
+    out = []                                                # diff lines, file after file
+    for path in sorted(final):                              # sorted, so the diff reads in the same order every run
+        # a changed source file; tests are the check, and a card shows the change itself
+        if path.endswith(".py") and final[path] != task.seed.get(path) and not is_test_file(path):
+            # n=0: changed lines only, no context, which keeps a card's diff short
+            out += difflib.unified_diff(task.seed.get(path, "").splitlines(), final[path].splitlines(),
+                                        f"seed/{path}", f"{arm}/{path}", lineterm="", n=0)
+    return out
+
+show_def(seed_diff, layer="plugin")
+
+#%% code
+demo_task = SUITE["ob-postcode-cache"]                      # the ticket of the first card
+demo_diff = seed_diff(demo_task, snapshot(WS_DIR / f"{demo_task.id}-good"), "good")   # the good reference from Part II
+print(f"[diff] the good answer to {demo_task.id}, as a card will show it ({len(demo_diff)} lines):")
+for diff_line in demo_diff[:12]:                            # the whole diff is short; twelve lines is plenty
+    print("    " + plain(diff_line)[:110])
+
+#%% md
+**`compare(task, eps, diff_lines)`** prints a card. The table has one row per arm: the scorer's verdicts, the code, prose and check lines added, new files, guards, the over-engineering shapes from Part I, what the change leans on, and whether the step the agent claimed is supported by its own diff. Below it come each arm's final answer and the start of its diff. The rows are returned as well, and the summary figure at the end of this Part collects them in `DEMOS`.
+
+#%% code
+def compare(task, eps, diff_lines=16):
+    """Score each arm's episode and print the evidence side by side, then each change."""
+    rows = []                                               # one row per arm
+    for arm, ep in eps.items():                             # arms in the order run_arms was given them
+        s = score(task, ep.ws)                              # verdicts and line counts from the fenced scorer
+        final = snapshot(ep.ws)                             # the files as the episode left them
+        ev = rung_evidence(task.seed, final)                # what the change leans on, read from its diff
+        claim = claimed_step(ep.done_text)                  # the step the answer names, or None
+        claim_text = "-"                                    # no step named: nothing to check
+        if claim:                                           # a named step is checked against the evidence
+            claim_text = f"step {claim} ({'supported' if supports(claim, ev) else 'NOT supported'})"
+        # the scorer's counts beside the evidence; check lines include a separate test file
+        rows.append({"arm": arm, "verdicts": s.short(), "added": s.added_code, "prose": s.added_prose,
+                     "check": s.added_check + s.added_test, "new files": s.files_new, "guards": s.guards,
+                     "shapes": shape_names(s), "leans on": ", ".join(sorted(ev["kinds"])) or "-",
+                     "claim": claim_text, "turns": len(ep.turns)})
+    # the card's table: one row per arm, numbers right-aligned
+    table(rows, [("arm", "arm", ""), ("verdicts", "verdicts", ""), ("added", "code", "d"), ("prose", "prose", "d"),
+                 ("check", "check", "d"), ("new files", "new files", "d"), ("guards", "guards", "d"),
+                 ("shapes", "shapes", ""), ("leans on", "leans on", ""), ("claim", "claimed", ""), ("turns", "turns", "d")])
+    for arm, ep in eps.items():                             # then each arm's answer and its change
+        print(f"\n  [{arm}] answer: {textwrap.shorten(plain(ep.done_text), 240)}")   # the final message, shortened
+        diff = seed_diff(task, snapshot(ep.ws), arm)        # every diff line of this arm's change
+        for line in diff[:diff_lines]:                      # the first few lines show the shape of the change
+            print("    " + plain(line)[:110])               # plain() turns typographic dashes into ASCII
+        if len(diff) > diff_lines:                          # say how much was left out, rather than hiding it
+            print(f"    ... {len(diff) - diff_lines} more diff lines")
+    return rows
+
+show_def(compare, layer="plugin")
+
+#%% md
+The first card: the postcode ticket from S23, once with no rules and once with the full level.
+
+#%% code
+DEMOS = {}       # card name: its rows, for the summary figure at the end of this Part
+t = SUITE["ob-postcode-cache"]                              # S23's worked example
+eps = run_arms(t, {"off": None, "rules": ruleset("full")})  # the same ticket with no rules, then with the full level
+DEMOS["S25 the ladder"] = compare(t, eps)                   # print the card, and keep its rows for the figure
+
+#%% md
+**Reading the card.** The `off` arm is the episode from S23 (the ledger answers it, so it costs nothing to show again), and the `rules` arm is the same ticket with the full ruleset in the system message. The table shows what each change leans on and whether the agent's claimed step is supported by its own diff; the two diffs below it show the code. Part VII removes the ladder from the full system across all 34 tasks to measure what it is worth; this card shows what the difference looks like on one ticket.
+
+#%% md
+## S26 - Read first, and fix the cause
+
+**Theory.** A rule that asks for small changes has a predictable failure: the agent makes a small change *in the wrong place*. Two sentences guard against it. The first makes reading a precondition rather than an option: the less code the agent means to write, the more carefully it reads, including the code that calls the function it changes. The second is the most carefully worded sentence in the ruleset. The plain-prose version of the rule ("fix the root cause, not the symptom") is a value, and a model that has also been told to make small changes resolves the conflict in favour of the smaller-looking patch. Our version removes the conflict by putting the guard on the side of the incentive: *one guard in the shared function is a smaller change than a guard in each caller, so the root cause is also the cheapest fix.* The three root-cause tasks are built for this: each bug sits in a shared function, the ticket mentions one caller, and a second caller elsewhere in the project shows whether the fix landed in the right place.
+
+**In plain terms.** Read before you change anything, and fix the bug where it starts, because that is also the smaller fix.
+
+#%% md
+**`read_before_edit(ep)`** answers, for each file the agent edited, whether it had looked at that file first: read it, or seen it in a search result. A grep counts because each line of its output starts with a file's path, and an agent that found a function by searching for its callers has read the part that matters. Only the first edit of each file is judged, since a second edit of a file the agent has just changed says nothing about reading.
+
+#%% code
+def read_before_edit(ep):
+    """For each file the agent edited: had it been read, or found by a search, first?"""
+    seen = set()                                            # files the agent has looked at so far
+    out = {}                                                # edited file: was it seen before its first edit?
+    for t in ep.turns:                                      # the episode's turns, in order
+        if t.action == "read" and t.ok:                     # a successful read
+            seen.add(t.target)
+        if t.action == "grep" and t.ok:                     # a search shows the files it matched
+            # grep output lines look like "geo.py:12: ..."; every file named there has been seen
+            seen.update(re.findall(r"^([\w./-]+\.py):\d+:", t.observation, re.M))
+        if t.action == "edit" and t.ok and t.target not in out:   # the first successful edit of this file
+            out[t.target] = t.target in seen                # had it been looked at by then?
+    return out
+
+show_def(read_before_edit, layer="plugin")
+
+#%% code
+t = SUITE["rc-day-parse"]                                   # a root-cause task: the bug sits in a shared function
+# the full level with its read-first section removed, against the full level as written
+eps = run_arms(t, {"rules-no-read": ruleset("full", drop=("Read first",)), "rules": ruleset("full")})
+DEMOS["S26 read first"] = compare(t, eps)                   # the card, kept for the figure
+for arm, ep in eps.items():                                 # then what each arm read before it edited
+    print(f"\n  [{arm}] files read before they were edited: {read_before_edit(ep) or 'no edits'}")
+
+#%% md
+## S27 - How to build
+
+**Theory.** Most over-engineering has a recognisable shape, and the ten shapes from Part I are named here in plain words, because a model obeys a concrete prohibition ("an abstract class with one subclass") far more reliably than an abstract one ("avoid unnecessary abstraction"). Around the prohibitions sit four habits with their own counterweights. *Code for the ticket in front of you* stops scaffolding for imagined futures, and *prefer deleting to adding, changing a file to creating one* sets the default direction of change. Then two sentences push the other way, on purpose: *short is good, cryptic is not* stops the golfing that S3b measured, and *when a sturdier algorithm costs a line or two more, pay it* stops the flimsy-algorithm failure that the edge tasks are built to catch. The last line is the calibration rule. "No setting for a value that never changes" has one real exception, values that depend on the physical world, which do change, because someone tunes them.
+
+**In plain terms.** No layers for one implementation, no code for imagined futures, readable rather than clever, and sturdy where it matters.
+
+#%% code
+worst = max(B_ROWS, key=lambda r: (r["shapes"], r["added"]))   # the S23 answer with the most shapes, then the most code
+t = SUITE[worst["task"]]                                    # its ticket, run again below
+print(f"[card] the baseline ticket with the most shapes from Part I: {t.id} ({worst['shapes']} shapes, "
+      f"{worst['added']} code lines)")
+eps = run_arms(t, {"off": None, "rules": ruleset("full")})  # the same ticket again, without the rules and with them
+DEMOS["S27 how to build"] = compare(t, eps)                 # the card, kept for the figure
+
+#%% md
+The calibration rule is the one place where the ruleset asks for *more* naming, so it is checked against Part I's detector for "config for a constant": a named constant for a value someone will tune should be wanted and not flagged, and a settings class only ever built with its defaults should be flagged.
+
+#%% code
+CALIBRATION = {   # snippet: does the calibration rule want this name?
+    "READ_TIMEOUT_S = 2.5  # the radio link drops after this": True,                # tuned in the field
+    "SENSOR_OFFSET_C = -0.4  # measured against a reference thermometer": True,     # measured once, and measured again later
+    # a settings class that is only ever built with its defaults: config for a constant
+    "class TaxSettings:\n    def __init__(self, rate=0.2):\n        self.rate = rate\n\nVAT = TaxSettings().rate": False,
+}
+rows = []                                                   # one row per snippet
+for snippet, ok in CALIBRATION.items():                     # ok: does the calibration rule want it?
+    shown = snippet.splitlines()[0]                         # the first line stands for the snippet
+    if "\n" in snippet:                                     # a multi-line snippet
+        shown += " ..."                                     # says that there is more of it
+    fires = any(s == 3 for s, _, _ in detect(snippet))      # shape 3 is Part I's "config for a constant"
+    rows.append({"snippet": shown, "wanted": "yes" if ok else "no", "fires": "yes" if fires else "no"})
+# the two columns should disagree on every row: wanted means not flagged, and flagged means not wanted
+table(rows, [("snippet", "snippet", ""), ("wanted", "the calibration rule wants it", ""),
+             ("fires", "Part I's settings detector fires", "")])
+print("\n  the two rules agree: a named constant for a value someone will tune is wanted and not flagged; a")
+print("  settings class only ever built with its defaults is the shape Part I calls config for a constant")
+
+#%% md
+## S28 - Never cut
+
+**Theory.** This is the section that makes the ruleset safe to use. Every other rule pushes towards less code, and a model under that pressure cuts first whatever *looks* optional, which is very often the guard: the path check, the placeholder in the query, the try around one row, the alt text. The list names five things that are never bloat, however many lines they take, and the wording is chosen so the model cannot read it as a size rule: *these are never bloat*. It covers trust boundaries in both directions (input arriving, and data leaving, which is where `sf-profile-response` leaks a password hash), errors that lose data, security, accessibility, and anything the user asked for. The last item doubles as the explicit-request rule: a user who wants the full version gets it, without being argued with a second time. Ten of the 34 tasks are safety tasks whose tickets never mention the guard they need, so this card is tested more than any other.
+
+**In plain terms.** Five things are never trimmed, no matter how many lines they take: input checks, data safety, security, accessibility, and what the user asked for.
+
+**For teams.** The list is short on purpose, and yours will need additions: audit logging, personal data, anything a regulator asks about. Add them to the list, then to the invariants of S34, so that no later rewording of the rules can drop them unnoticed.
+
+**What the rules protect, whatever it costs in lines.** Removing any of these turns a smaller answer into a wrong or unsafe one. The ones that live in code have signatures from S3c, and Part VI's trim guard refuses any edit that lowers their count.
+
+{{diagram:never_cut}}
+
+#%% code
+t = SUITE["sf-feedback-body"]                               # a safety task whose ticket never mentions the guard it needs
+# the full level with its never-cut section removed, against the full level as written
+eps = run_arms(t, {"rules-no-never-cut": ruleset("full", drop=("Never cut",)), "rules": ruleset("full")})
+DEMOS["S28 never cut"] = compare(t, eps)                    # the card, kept for the figure
+for arm, ep in eps.items():                                 # then the guards each arm's code carries
+    final = snapshot(ep.ws)                                 # the files as the episode left them
+    found = guard_signatures(final.get(t.entry, ""))        # Part I's guard patterns, in the ticket's own file
+    print(f"\n  [{arm}] guard signatures in {t.entry}: {found or 'none'}")
+
+#%% md
+## S29 - How to answer
+
+**Theory.** Over-building is not only code. An agent that writes twelve lines and a three-paragraph essay about why it wrote twelve lines has produced more for someone to read, and the essay is often where the hedging and the second-guessing live. The output contract is short: code first, then at most three short lines, and for each thing deliberately not built, a line in a fixed format, `left out: <what> (build it when <condition>)`. The format matters more than it seems. A deferral with a condition is a decision someone can act on later; a vague "could be extended" is not. The contract also asks the agent to state the step it stopped at, which S25 checks against the diff. Two exceptions keep the contract from cutting the wrong prose: an explanation the user asked for is given in full, and the agent does not stop to ask a question it can answer with a sensible default (it builds the default and says which one it picked), because a question costs the user a round trip.
+
+**In plain terms.** Show the code, then say in three lines what you did and what you left out, and when the leftover should be built.
+
+#%% md
+**`check_contract(text)`** measures a final message against the output contract: its non-blank lines and words, whether it stays within three lines, how many well-formed `left out:` lines it carries, how many lines try to defer something without the required `(build it when ...)` condition, and which step it claims. The pattern `LEFT_OUT` is strict on purpose. A deferral is only useful with its condition, so a line that leaves the condition out is counted as malformed rather than quietly accepted.
+
+#%% code
+# "left out: <what> (build it when <condition>)", then at most a full stop
+LEFT_OUT = re.compile(r"^\s*left out:\s*(.+?)\s*\(build it when\s+(.+?)\)\s*\.?\s*$", re.I)
+
+def check_contract(text):
+    """How a final message measures against the contract."""
+    lines = [l for l in (text or "").splitlines() if l.strip()]   # non-blank lines; a missing answer has none
+    left = []                                               # well-formed deferrals, as (what, when)
+    for line in lines:                                      # each line, tried against the strict pattern
+        m = LEFT_OUT.match(line)                            # None unless the whole line is a deferral
+        if m:                                               # both parts are there: what, and when to build it
+            left.append(m.groups())                         # (what was left out, when to build it)
+    # lines that start like a deferral but miss the format, usually the "(build it when ...)" part
+    loose = [l for l in lines if l.strip().lower().startswith("left out") and not LEFT_OUT.match(l)]
+    return {"lines": len(lines),
+            "words": len((text or "").split()),
+            "within": len(lines) <= 3,                      # the contract allows three short lines
+            "left_out": len(left),                          # deferrals someone can act on later
+            "malformed": len(loose),                        # deferrals without a condition
+            "step": claimed_step(text)}                     # compare() checks this claim against the diff
+
+show_def(check_contract, layer="plugin")
+
+#%% code
+samples = {   # one message that keeps the contract, and two that break it in the usual ways
+    "contract kept": "step 3: functools.cache on lookup_district.\nleft out: cache clearing (build it when the register changes)",
+    "a deferral without a condition": "Added a cache.\nleft out: eviction, could be added later",
+    "an essay": "I considered several approaches.\n" * 6 + "In the end I added a cache.",
+}
+# one row per sample message, with every measure check_contract returns
+table([{"message": k, **check_contract(v)} for k, v in samples.items()],
+      [("message", "message", ""), ("lines", "lines", "d"), ("within", "within 3 lines", ""), ("left_out", "left out", "d"),
+       ("malformed", "malformed", "d"), ("step", "step", "")])
+
+#%% md
+The same measure over every final message the cards above produced, and over the 34 unguided answers from S23 for scale.
+
+#%% code
+# one row per card episode: the contract's measures, and how much prose the agent wrote along the way
+rows = [{"arm": ep.arm, "task": ep.task,
+         **check_contract(ep.done_text),                    # lines, words, within, left_out, malformed, step
+         "notes": sum(t.notes_chars for t in ep.turns)}    # prose the agent wrote between its actions
+        for ep in PART4_EPISODES]
+print("\n  every final message from this Part's cards so far:")
+# the contract limits the final message, not the notes, so the notes column is there for scale
+table(rows, [("arm", "arm", ""), ("task", "task", ""), ("words", "words", "d"), ("lines", "lines", "d"),
+             ("within", "within 3 lines", ""), ("left_out", "left out", "d"), ("step", "step", ""),
+             ("notes", "notes chars", "d")])
+
+#%% code
+base = [check_contract(ep.done_text) for ep in BASELINE.values()]   # the unguided answers from S23
+# the median length, how many kept to three lines, and how many deferrals they wrote without being asked
+print(f"\n  for scale, the 34 baseline answers from S23: median {np.median([c['words'] for c in base]):.0f} words, "
+      f"{sum(c['within'] for c in base)}/{len(base)} within three lines, {sum(c['left_out'] for c in base)} 'left out' lines")
+save_exp("contract", {"baseline_median_words": float(np.median([c["words"] for c in base])),   # a plain float for JSON
+                      "baseline_within": sum(c["within"] for c in base),     # baseline answers within three lines
+                      "baseline_n": len(base),                               # how many baseline answers there are
+                      # this Part's card answers, the fields the prose quotes
+                      "cards": [{k: r[k] for k in ("arm", "task", "words", "within", "left_out")} for r in rows]})
+
+#%% md
+## S30 - Shortcuts, marked where they live
+
+**Theory.** Permission to build less is only safe if the limits of what was built are visible. A shortcut marker is one comment on the line where the limit lives, naming the limit and the condition for upgrading: `# shortcut: unbounded cache; upgrade when memory matters`. It turns a hidden assumption into a searchable fact, it tells a reviewer that the simple version is a choice rather than an oversight, and it is what Part VI's debt skill collects into a ledger. The rule is restricted to *real* limits on purpose: a marker on every simplification is noise, and noise teaches reviewers to ignore markers.
+
+**In plain terms.** When the agent knowingly cuts a corner, it leaves a note saying where the corner is and when to come back.
+
+#%% md
+**`find_markers(files)`** lists every shortcut marker in a set of files, well formed or not. Two patterns do the work: `ANY_MARKER` finds anything that looks like a marker, and `MARKER` checks the full form, a limit and an upgrade condition. Keeping the loose search separate is what lets a malformed marker show up as malformed instead of disappearing; Part VI's debt ledger lists them all and flags the ones with no condition.
+
+#%% code
+MARKER = re.compile(r"#\s*shortcut:\s*(.+?);\s*upgrade when\s+(.+?)\s*$", re.I)   # the full form, any letter case
+ANY_MARKER = re.compile(r"#\s*shortcut\b", re.I)           # anything that tries to be a marker
+
+def find_markers(files):
+    """Every shortcut marker in {path: text}, well formed or not."""
+    out = []                                                # one entry per marker found
+    for path, text in files.items():                        # every file given, by path
+        for n, line in enumerate(text.splitlines(), 1):     # numbered from 1, as an editor shows them
+            if ANY_MARKER.search(line):                     # something on this line tries to be a marker
+                m = MARKER.search(line)                     # None when the limit or the condition is missing
+                out.append({"file": path, "line": n,        # where the marker lives
+                            "limit": m.group(1) if m else None,
+                            "when": m.group(2) if m else None,
+                            "well_formed": bool(m)})
+    return out
+
+show_def(find_markers, layer="plugin")
+
+#%% code
+demo_files = {"geo.py": "@cache  # shortcut: unbounded cache; upgrade when memory matters\n"   # well formed
+                        "def lookup(code): ...\n"                                              # no marker here
+                        "# shortcut: global lock\n"                                            # no upgrade condition
+                        "LOCK = threading.Lock()  # SHORTCUT: one lock for all accounts; Upgrade when two accounts contend\n"}
+# the capitals on the last line still count: both patterns ignore letter case
+table(find_markers(demo_files), [("file", "file", ""), ("line", "line", "d"), ("limit", "limit", ""), ("when", "upgrade when", ""),
+                                 ("well_formed", "well formed", "")])
+
+#%% md
+## S31 - Prove it: one runnable check
+
+**Theory.** Less code is only an improvement if it still works, and the cheapest way to keep that promise is one runnable check that fails when the code is wrong. "One" is doing as much work as "check". An agent told to test tends to produce a test suite, with fixtures, a framework and a test per function, which is a feature nobody asked for and more code to maintain than the change itself. The rule asks for a few asserts under `if __name__ == "__main__":` or one small test file, and Part I's meter already treats both as *check* lines rather than code, so writing the check is never punished as bloat. Part VII measures whether the checks agents write actually catch bugs, by running the same mutation testing as S8b against them.
+
+**In plain terms.** Leave one small test that would fail if the code were wrong. A test suite is a separate job.
+
+#%% code
+# a cached lookup with its check: three asserts under the main guard
+check_example = textwrap.dedent('''
+    from functools import cache
+
+    @cache
+    def lookup_district(postcode):
+        return register.scan(normalise(postcode))
+
+    if __name__ == "__main__":
+        assert lookup_district("SW1A 1AA") == "Westminster"
+        assert lookup_district("ZZ9 9ZZ") is None
+        print("ok")
+''')
+m = measure_source(check_example, "geo.py")                 # Part I's meter, on a change that carries its check
+print(f"[meter] a change with its check: {m['code']} code lines, {m['check']} check lines; the check is not counted as code")
+
+#%% code
+# what each card's arms wrote as checks, beside the code they added
+for card, rows in DEMOS.items():                            # every card so far
+    for r in rows:                                          # every arm of that card
+        print(f"  {card:<20} {r['arm']:<20} check lines {r['check']:>3}   code lines {r['added']:>3}")
+
+#%% md
+## S32 - The scope of the rules, and how long they last
+
+**Theory.** Two sentences close the ruleset, and both are boundaries. The first says how long the rules last: *every reply in this session that touches code, until the user switches them off*. Models drift back to their habits as a conversation grows, and a rule that does not say it persists is quietly treated as a one-off. Part V reinforces this mechanically, with a one-line header on every prompt and a re-injection after compaction, and Part VII measures the drift with and without those mechanisms. The second sentence fences the scope: *they are about the code you produce, not your tone*. Without it, a model that has been told to be brief becomes curt with the user, truncates explanations it was asked for, and treats a question about code as an invitation to write some. Together with the explanation exemption in "How to answer", it is what lets the ruleset sit in every session without spoiling the ones that are not about building anything.
+
+**In plain terms.** The rules last the whole session, and they cover the code, not the conversation.
+
+#%% code
+t = SUITE["ob-postcode-cache"]                              # the project the question is about
+# a question about the code, not a ticket; with a prompt given, run_arms keeps these out of PART4_EPISODES
+question = ("Explain, in detail, how lookup_district in geo.py finds a district, step by step. "
+            "Do not change any code; this is a question.")
+eps = run_arms(t, {"off-explain": None, "rules-explain": ruleset("full")}, prompt=question)   # no rules, then full
+for arm, ep in eps.items():                                 # each arm's answer to the question
+    edits = sum(t_.action == "edit" for t_ in ep.turns)    # edits made while answering a question
+    c = check_contract(ep.done_text)                        # its length in words and lines
+    print(f"[{arm}] {c['words']} words in {c['lines']} lines, {edits} edits; first lines:")
+    for line in plain(ep.done_text).splitlines()[:4]:       # the start of the answer is enough to judge its shape
+        print("    " + line[:110])
+
+#%% code
+EXPLAIN = {}                                                # arm: how long its answer was, and how many edits it made
+for arm, ep in eps.items():                                 # the two arms of the question above
+    # the answer's length in words, and any edits made while answering a question
+    EXPLAIN[arm] = {"words": check_contract(ep.done_text)["words"], "edits": sum(x.action == "edit" for x in ep.turns)}
+# the exemption holds if the answer under the rules is at least half as long as the one without them
+if EXPLAIN["rules-explain"]["words"] >= 0.5 * EXPLAIN["off-explain"]["words"]:
+    EXPLAIN["verdict"] = "IN FULL"                          # the explanation survived the three-line limit
+else:
+    EXPLAIN["verdict"] = "CUT SHORT"                        # the limit won, and the rule needs rewording
+print(f"\n  the requested explanation, with the rules: {EXPLAIN['verdict']}")
+save_exp("explain", EXPLAIN)                                # the prose below quotes these numbers
+
+#%% md
+Asked for a step-by-step explanation, the agent without the rules answered in {{exp:explain.off-explain.words}} words and the agent with them in {{exp:explain.rules-explain.words}}, with {{exp:explain.rules-explain.edits}} edits made where none were asked for. {{pick:explain.verdict|IN FULL=The exemption works: the three-line limit stayed with prose nobody asked for, and the explanation that was asked for came back whole.|CUT SHORT=The exemption still loses to the limit: the explanation that was asked for came back cut short, and the wording of "How to answer" needs another revision before this rule can be trusted.}} This is the sentence whose first wording failed (S85, bug 5), measured again after the rewrite.
+
+#%% md
+## S33 - Three levels, side by side
+
+**Theory.** The three levels are the user's way of choosing how hard the system pushes. They are not three personalities: they share every core line, every invariant and the whole never-cut list, and they differ only in how the build decision is made (lite builds first and comments afterwards, full climbs the ladder, ultra starts from deletion). The widget below shows any level next to full; the static print above it shows exactly which lines differ, so the comparison survives in a notebook viewer that cannot run widgets. Part VII measures the dose-response across all 34 tasks (H6), including the cost we expect ultra to pay in completeness.
+
+**In plain terms.** Lite, full and ultra share their safety rules and differ only in how much they push to build less.
+
+**Three strengths of the same rules.** Lite changes what the agent says after the code, full changes what it builds, and ultra changes what it is willing to keep. S67 measures what each one costs and saves.
+
+{{diagram:levels}}
+
+#%% code
+full_lines = set(ruleset("full").splitlines())              # the full level, as a set of lines
+for level in ("lite", "ultra"):                             # each level against full
+    lines = set(ruleset(level).splitlines())                # this level's lines
+    print(f"[{level} vs full] only in {level}:")
+    for line in sorted(lines - full_lines - {""}):          # a blank line is not a difference worth printing
+        print(f"    + {line}")
+    if level == "lite":                                     # lite also lacks lines that full has: count them
+        print(f"  only in full: {len(full_lines - lines - {''})} lines (the ladder and the build rules)")
+    else:                                                   # ultra keeps every line of full
+        print("  everything else is shared")
+
+#%% code
+W = widgets()                                               # None in a headless run: the comparison above then stands alone
+if W:
+    from IPython.display import display                     # only needed when there is a widget to show
+    pick = W.ToggleButtons(options=LEVELS, value="full", description="level")   # one button per level
+    # a scrolling box for the chosen level's text
+    out = W.Output(layout={"border": "1px solid #e6e5e1", "max_height": "320px", "overflow": "auto"})
+
+    def _show(change=None):
+        out.clear_output()                                  # one level at a time
+        with out:                                           # print into the box, not under the cell
+            text = ruleset(pick.value)                      # the chosen level, exactly as a model reads it
+            print(f"{pick.value}: about {tokens_of(text)} tokens\n")
+            print(text)
+
+    pick.observe(_show, names="value")                      # redraw whenever another level is picked
+    _show()                                                 # and draw the starting level once
+    display(W.VBox([pick, out]))                            # the buttons above the box
+else:
+    print("(no widget in this run, which needs a live Jupyter session; the static comparison above is the whole story)")
+
+#%% code
+t = SUITE["ob-postcode-cache"]                              # the ladder's ticket again, so the levels line up with S25
+# the three levels side by side; the full arm repeats S25's run, so the ledger answers it
+eps = run_arms(t, {"rules-lite": ruleset("lite"), "rules": ruleset("full"), "rules-ultra": ruleset("ultra")})
+DEMOS["S33 three levels"] = compare(t, eps, diff_lines=8)   # three diffs, so a shorter excerpt of each
+
+#%% md
+## S34 - Copies that cannot drift
+
+**Theory.** The ruleset reaches the model through several copies: three levels, a compact copy for subagents and the critic (core lines only), and a one-line header that Part V adds to every prompt. Hand-maintained copies drift: someone edits the long version, forgets the short one, and the safety rule that was reworded in one place is missing from the other. Ours cannot drift for a simple reason: every copy is *generated* by filtering the single source, so there is nothing to keep in sync by hand. What can still go wrong is the filter, which is why `drift_check` verifies every copy against the list of invariant phrases, word for word, and the test below plants a hand-edited copy to show the check catching it.
+
+**In plain terms.** Every version of the rules is cut from the same text by a program, and a checker makes sure each one still carries the safety rules.
+
+**For teams.** If the rules live in more than one place (a project file, a CI prompt, a review bot), generate every copy from one source and run a drift check like this one in CI. Hand-edited copies diverge within weeks, and the line that goes missing is rarely the one anybody would choose to lose.
+
+#%% md
+**`copies()`** returns every copy of the ruleset the plugin uses, each one generated from `RULESET_SOURCE` on the spot: the three levels and the compact copy. Because nothing is stored, there is nothing to keep in sync; what remains to check is the generator, which is what `drift_check` is for.
+
+#%% code
+def copies():
+    """Every copy of the ruleset the plugin uses, all generated from RULESET_SOURCE."""
+    out = {level: ruleset(level) for level in LEVELS}       # lite, full and ultra
+    out["compact"] = ruleset("full", core_only=True)        # the core lines, for subagents and the critic
+    return out
+
+show_def(copies, layer="plugin")
+
+#%% code
+for copy_name, copy_text in copies().items():               # every copy the plugin can send, and its cost
+    print(f"  {copy_name:<8} about {tokens_of(copy_text)} tokens")
+
+#%% md
+**`drift_check(texts)`** compares each copy with the list of invariant phrases and reports, for every copy that has lost one, exactly which phrases are missing; a clean set of copies gives an empty result. The comparison is word for word on purpose. A reworded safety rule is the drift that matters, and a check that accepted near matches would miss it.
+
+#%% code
+def drift_check(texts):
+    """{copy: [invariant phrases it lacks]} for every copy that lacks one."""
+    out = {}                                                # copy name: the phrases it lost
+    for name, text in texts.items():                        # every copy handed in, generated or not
+        missing = [p for p in INVARIANTS if p not in text]  # phrases this copy no longer carries word for word
+        if missing:                                         # a clean copy is left out, so {} means all clean
+            out[name] = missing
+    return out
+
+show_def(drift_check, layer="plugin")
+
+#%% code
+results = []                                                # expect() records each check here
+expect("every generated copy carries every invariant", drift_check(copies()) == {})   # {} means nothing is missing
+# a hand-edited copy, the way drift really happens: one safety line reworded into something vaguer
+hand_edited = ruleset("full").replace("handling for errors that would lose or corrupt data", "error handling where it matters")
+caught = drift_check({**copies(), "hand-edited full": hand_edited})   # the generated copies plus the planted one
+expect("a hand-edited copy that rewords a safety rule is caught", list(caught) == ["hand-edited full"])   # and only it
+print(f"  the planted copy lacks: {caught.get('hand-edited full')}")
+save_exp("drift", {"copies": len(copies()), "clean": drift_check(copies()) == {}})   # for Part VII's summary
+
+#%% md
+## S35 - The router: does a skill's description decide when it applies?
+
+**Theory.** The ruleset should govern requests that produce code and stay out of the way of everything else: "what does a decorator do?" does not need a ladder. The plugin decides with a **router**: the fast model reads a skill's one-line description and the user's request, and answers yes or no. That makes the description the whole of the routing logic, so it has to be written as a *trigger* ("use for every request that writes, changes, fixes or removes code, however small; do not use for questions, explanations or writing that is not code") rather than as a summary of what the skill contains ("keeps code simple and lean"). The difference is measured here on 40 labelled requests, half of which ask for code. A few are deliberately close calls, such as explaining a piece of code (no code is produced) and writing a test (code is produced). Recall matters more than precision for this skill: a missed coding request runs without the rules, while a false alarm only adds a ruleset to a conversation that ignores it.
+
+**In plain terms.** A one-line description decides when the rules switch on, so we test two wordings against forty requests and count the mistakes.
+
+#%% md
+The test set: twenty requests that ask for code and twenty that do not, with a few close calls on each side.
+
+#%% code
+# (request, does it ask for code?): the first twenty do, the second twenty do not
+ROUTER_SET = [(r, True) for r in (
+    "Add a --verbose flag to the command-line tool.", "Fix the off-by-one error in paginate().",
+    "Rename get_user to fetch_user everywhere.", "Write a function that parses ISO dates from the log lines.",
+    "The import job crashes on empty rows; make it skip them.", "Cache the exchange-rate lookups.",
+    "Add a unique constraint so emails cannot repeat.", "Remove the duplicated retry code from the payment module.",
+    "Make the search endpoint return results sorted by date.", "Add type hints to utils.py.",
+    "Delete the unused legacy exporter.", "Write a test for the discount calculation.",
+    "Port this script from Python 2 to Python 3.", "Implement CSV export for the orders table.",
+    "Validate the uploaded file name before saving it.", "The report reads the same file five times; make it read it once.",
+    "Change the default timeout from 5 to 30 seconds.", "Log a warning when a retry happens.",
+    "Make the config loader accept a missing file.", "Split the 900-line views.py into smaller modules.")] + \
+    [(r, False) for r in (
+    "What does a Python decorator do?", "Explain how this caching code works.", "Write a haiku about debugging.",
+    "Summarise this meeting transcript.", "Which is faster in Python, a list or a tuple, and why?",
+    "Draft an email to the team about the release.", "Translate this paragraph into French.",
+    "What is the difference between TCP and UDP?", "Review this pull request description for clarity.",
+    "How do I pronounce 'nginx'?", "Give me three names for a new coffee shop.", "What time zone is Auckland in?",
+    "Explain the CAP theorem simply.", "Write a cover letter for a junior developer job.",
+    "What are the trade-offs of microservices?", "Proofread the introduction of my README.",
+    "Plan a two-week study schedule for learning SQL.", "Is it 'licence' or 'license' in British English?",
+    "Tell me a joke about recursion.", "Compare Rust and Go for a beginner.")]
+# the labels are what the router is scored against
+print(f"[router] {len(ROUTER_SET)} labelled requests, {sum(want for _, want in ROUTER_SET)} of them asking for code")
+
+#%% md
+The two wordings under test, and the router's system message, into which one wording at a time is placed.
+
+#%% code
+# "trigger" says when the skill applies and when it does not; "summary" says what the skill contains
+DESCRIPTIONS = {
+    "trigger": "Use for every request that writes, changes, fixes or removes code, however small. "
+               "Do not use for questions, explanations or writing that is not code.",
+    "summary": "Keeps code simple and lean.",
+}
+ROUTER_SYSTEM = ("You decide whether a skill applies to a request. Answer with exactly one word, yes or no.\n\n"
+                 "The skill: {description}")
+print(ROUTER_SYSTEM.format(description=DESCRIPTIONS["trigger"]))   # the system message as the router reads it
+
+#%% md
+**`route(request, description, model)`** asks the fast model whether a skill applies to a request, with the skill's one-line description placed in the router's system message, and reads the first word of the reply as yes or no. The call is made as cheap and as repeatable as possible: temperature zero, eight tokens at most, and thinking switched off on every model the S12 probe found to accept that switch, since a yes or no gains nothing from reasoning.
+
+#%% code
+def route(request, description, model=None):
+    """True if the router thinks the skill applies to the request."""
+    model = model or MODEL_FOR["fast"]                      # routing runs on every prompt, so it uses the cheap model
+    extra = {}                                              # parameters only some models accept
+    if "thinking off" in CAN.get(model, ()):                # S12 found which models accept the switch
+        extra = {"enable_thinking": False}                  # a one-word answer needs no reasoning
+    # one system message with the description in it, then the request; one word back, the same word every time
+    r = FRONT_DOOR.chat(model, [{"role": "system", "content": ROUTER_SYSTEM.format(description=description)},
+                                {"role": "user", "content": request}], tag="router", temperature=0.0, max_tokens=8, **extra)
+    return r.text.strip().lower().startswith("yes")         # "Yes.", "yes" and "YES" all count
+
+show_def(route, layer="plugin")
+
+#%% md
+**`_scripted_router(model, messages, params)`** answers router requests in smoke runs, where no model is called. Under the summary wording it says yes to every request; under the trigger wording it says yes exactly when the request opens with one of the coding verbs from the test set. That keeps a smoke run's table fixed from run to run, while the live numbers come from the real router. It returns `None` for any other request, so the scripted model passes it on to the next responder.
+
+#%% code
+@SCRIPTED.register
+def _scripted_router(model, messages, params):
+    if not messages[0]["content"].startswith("You decide whether a skill applies"):   # not a router request
+        return None
+    if "simple and lean" in messages[0]["content"]:          # the summary wording
+        return "yes"
+    # the openings of the twenty coding requests; none of the other twenty starts with one of them
+    verbs = ("add", "fix", "rename", "write a function", "make", "cache", "remove", "delete", "port", "implement",
+             "validate", "change", "log", "split", "write a test", "the import", "the report")
+    if messages[-1]["content"].lower().startswith(verbs):   # the request, in lower case, opens with one of them
+        return "yes"
+    return "no"
+
+show_def(_scripted_router, layer="lab")
+
+#%% md
+Every request under both wordings, eighty questions in all, asked in parallel:
+
+#%% code
+jobs = [(req, want, name) for name in DESCRIPTIONS for req, want in ROUTER_SET]   # every request under both wordings
+with ThreadPoolExecutor(WORKERS) as pool:                   # the questions are independent, so they run at once
+    # a job is (request, wanted answer, wording name): ask the request under that wording
+    said = list(pool.map(lambda j: route(j[0], DESCRIPTIONS[j[2]]), jobs))
+print(f"[router] {len(jobs)} questions asked, {sum(said)} answered yes")
+
+#%% code
+ROUTER = {}                                                 # wording name: its scores
+for name in DESCRIPTIONS:                                   # trigger, then summary
+    pairs = [(want, s) for (req, want, n), s in zip(jobs, said) if n == name]   # (wanted, said) for this wording
+    tp = sum(w and s for w, s in pairs)                     # coding requests it said yes to
+    fp = sum(not w and s for w, s in pairs)                 # false alarms: yes to a request that is not code
+    fn = sum(w and not s for w, s in pairs)                 # misses: no to a request that is code
+    ROUTER[name] = {"precision": tp / (tp + fp) if tp + fp else 0.0,   # of its yes answers, the share that wanted code
+                    "recall": tp / (tp + fn) if tp + fn else 0.0,      # of the coding requests, the share it caught
+                    "false alarms": fp, "missed": fn}       # the two kinds of mistake, as counts
+# recall is the column that matters most for this skill: a miss runs a coding request without the rules
+table([{"description": n, **v} for n, v in ROUTER.items()],
+      [("description", "description", ""), ("precision", "precision", ".2f"), ("recall", "recall", ".2f"),
+       ("false alarms", "false alarms", "d"), ("missed", "missed coding requests", "d")])
+
+#%% code
+# the requests the trigger wording got wrong, with the answer each one wanted
+wrong = [(req, want) for (req, want, n), s in zip(jobs, said) if n == "trigger" and s != want]
+print(f"\n  the trigger wording's mistakes: {wrong or 'none'}")
+save_exp("router", ROUTER)                                  # the prose under the figure quotes these scores
+
+#%% code
+# FIG  the router, and every live card of this Part on one page
+fig, axes = plt.subplots(1, 2, figsize=(11, 3.8), gridspec_kw={"width_ratios": [1, 1.6]})   # the cards get the wider panel
+ax = axes[0]                                                # left: the router test
+x = np.arange(2)                                            # two groups of bars: precision, then recall
+for i, name in enumerate(DESCRIPTIONS):                     # one colour per wording
+    # one bar per wording in each group, side by side
+    ax.bar(x + (i - 0.5) * 0.38, [ROUTER[name]["precision"], ROUTER[name]["recall"]], 0.36,
+           color=(C1, MUTED)[i], label=f"{name} wording")
+ax.set_xticks(x, ["precision", "recall"])                   # name the two groups
+ax.set_ylim(0, 1.1)                                         # room above a perfect score for the bars to breathe
+ax.legend(loc="lower right", fontsize=7.5)                  # bottom right, clear of the bar tops
+panel(ax, "the router on 40 labelled requests")             # the caption, top left
+ax = axes[1]                                                # right: one bar per arm of every card
+labels = []                                                 # "the ladder: off" and so on, without the section number
+added = []                                                  # the code lines each of those arms added
+for card, rows in DEMOS.items():                            # every card, in the order it ran
+    for r in rows:                                          # every arm of that card
+        labels.append(f"{card.split(' ', 1)[1]}: {r['arm']}")   # drop the "S25 " prefix
+        added.append(r["added"])                            # the bar's length
+y = np.arange(len(labels))                                  # one row per arm
+# red where the arm lacks the rule the card is about (off, or rules-no-...), blue where it has it
+ax.barh(y, added, 0.6, color=[C8 if "off" in l or "no-" in l else C1 for l in labels])
+ax.set_yticks(y, labels, fontsize=7)                        # small type: one label per arm of every card
+ax.invert_yaxis()                                           # cards from top to bottom, in the order they ran
+ax.set_xlabel("code lines added")                           # Part I's meter: comments and docstrings not counted
+panel(ax, "one run per arm on each card's ticket (red: rule absent, blue: rule present)")
+# the title states the finding; the subtitle says how much weight single runs can bear
+finish(fig, "s35_router_cards", f"The trigger wording routes with recall {ROUTER['trigger']['recall']:.2f}, "
+       f"the summary wording {ROUTER['summary']['recall']:.2f}",
+       "right: single runs are illustrations; Part VII's ablations are the evidence")
+
+#%% md
+**Reading FIG 13 (s35_router_cards).** The left panel is the router test. The trigger wording, which says when to apply the skill and when not to, scored a precision of {{exp:router.trigger.precision:.2f}} and a recall of {{exp:router.trigger.recall:.2f}}; the summary wording, which describes what the skill contains, scored {{exp:router.summary.precision:.2f}} and {{exp:router.summary.recall:.2f}}. The right panel collects every live card of this Part: each bar is one run of one ticket under one arm, red where the rule being demonstrated was absent and blue where it was present. This is what single runs look like: some cards show the expected difference, others show none, because one sample of a stochastic model proves little. That is why every rule faces the ablation ledger in Part VII before it is kept.
+
+#%% md
+**Part IV recap.** The plugin now has its words: a ruleset of about seven hundred tokens, generated at three levels from one source that cannot drift, in which every push towards less code is paired with the guard that stops it going too far. The ladder gives the model a procedure with a stopping point instead of a value; reading first and fixing the cause are framed so that the guard is also the cheaper option; five things are never cut; one check proves the code; shortcuts are marked; answers are short except where an explanation was asked for. Every claim the agent makes about its own work (the step it stopped at, what it left out, its shortcuts) can be checked against its diff. Part V delivers these words reliably, every session, every prompt, every subagent.
+
+**Try it yourself.**
+1. Add a rule to `RULESET_SOURCE`, for example "prefer pure functions", and run S24. Does it fit the budget? If it does not, which existing line would you remove to make room, and why that one?
+2. Change `EARLY_STEP_LINES` to 6 and re-run the instrument check in S25. Which good answers stop being believable, and is the rule or the threshold at fault?
+3. Write a third router description of your own and add it to `DESCRIPTIONS`. Try to beat the trigger wording's recall without losing precision.

@@ -1,0 +1,15 @@
+flowchart TD
+    %%STYLES%%
+    R["🤖 <b>a model request</b><br/>model · messages · parameters · replica"]:::grey --> H{{"📒 <b>in the ledger?</b>"}}:::gold
+    H -- "yes" --> A["✅ <b>the stored answer</b><br/>no call · no cost"]:::plugin
+    H -- "no" --> MODE{{"<b>which mode?</b>"}}:::gold
+    MODE -- "smoke" --> S["🎭 <b>scripted stand-in</b><br/>free · deterministic"]:::grey
+    MODE -- "replay" --> F{{"noted as failed<br/>when collected?"}}:::gold
+    F -- "yes" --> E["⚠️ <b>the same failure</b><br/>the collect run met"]:::gold
+    F -- "no" --> MISS["⛔ <b>CacheMiss</b><br/>the notebook stops"]:::warn
+    MODE -- "collect" --> OK{{"self-test passed?<br/>under the daily cap?"}}:::gold
+    OK -- "no" --> REF["⛔ <b>refuse<br/>to spend</b>"]:::warn
+    OK -- "yes" --> CALL["📡 <b>live call</b>"]:::host
+    CALL --> ST{{"answered, or an error<br/>that would repeat?"}}:::gold
+    ST -- "yes" --> SAVE["💾 <b>stored as the answer</b><br/>a replay meets it too"]:::plugin
+    ST -- "no" --> NOTE["📝 <b>noted as a failure</b><br/>the next collect retries it"]:::gold

@@ -1,0 +1,40 @@
+{
+  "off": {
+    "turns": 10.0,
+    "model s": 44.9396,
+    "tokens in": 11915.5,
+    "tokens out": 2146.5,
+    "reasoning": 3788.5
+  },
+  "terse": {
+    "turns": 10.0,
+    "model s": 32.7128,
+    "tokens in": 9328.0,
+    "tokens out": 1298.0,
+    "reasoning": 2889.5
+  },
+  "slogan": {
+    "turns": 10.0,
+    "model s": 40.9626,
+    "tokens in": 9396.5,
+    "tokens out": 1909.0,
+    "reasoning": 4317.5
+  },
+  "rules": {
+    "turns": 12.0,
+    "model s": 63.2565,
+    "tokens in": 25068.5,
+    "tokens out": 2985.5,
+    "reasoning": 7527.5
+  },
+  "full": {
+    "turns": 12.0,
+    "model s": 84.795,
+    "tokens in": 29801.5,
+    "tokens out": 3993.5,
+    "reasoning": 10266.5
+  },
+  "hook_share": 0.0014,
+  "rules_tax": 986,
+  "hooks": "SMALL"
+}

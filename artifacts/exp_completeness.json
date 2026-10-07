@@ -1,0 +1,25 @@
+{
+  "off": {
+    "explicit_open": 0.875,
+    "all": 0.9015
+  },
+  "terse": {
+    "explicit_open": 1.0,
+    "all": 0.9403
+  },
+  "slogan": {
+    "explicit_open": 0.9375,
+    "all": 0.9328
+  },
+  "rules": {
+    "explicit_open": 1.0,
+    "all": 0.9318
+  },
+  "full": {
+    "explicit_open": 0.9375,
+    "all": 0.9167
+  },
+  "agree": 0.9307,
+  "pass_incomplete": 6,
+  "fail_complete": 17
+}

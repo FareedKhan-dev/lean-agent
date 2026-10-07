@@ -1,0 +1,119 @@
+{
+  "system": "lean-agent",
+  "mode": "replay",
+  "collected": {
+    "from": "2026-10-05",
+    "to": "2026-10-06"
+  },
+  "models": {
+    "coder": {
+      "id": "Qwen-Ambassador/Qwen3.8-27B",
+      "can": [
+        "JSON mode",
+        "answers",
+        "thinking off",
+        "two system messages"
+      ]
+    },
+    "fast": {
+      "id": "Qwen-Ambassador/Qwen3.8-Flash-Next",
+      "can": [
+        "JSON mode",
+        "answers",
+        "thinking off",
+        "two system messages"
+      ]
+    },
+    "judge": {
+      "id": "Qwen-Ambassador/Qwen3.7-Max",
+      "can": [
+        "JSON mode",
+        "answers",
+        "thinking off",
+        "two system messages"
+      ]
+    },
+    "judge2": {
+      "id": "Qwen-Ambassador/Qwen3.7-Plus",
+      "can": [
+        "JSON mode",
+        "answers",
+        "thinking off",
+        "two system messages"
+      ]
+    },
+    "big": {
+      "id": "Qwen-Ambassador/Qwen3.8-Max",
+      "can": [
+        "JSON mode",
+        "answers",
+        "thinking off",
+        "two system messages"
+      ]
+    },
+    "omni": {
+      "id": "Qwen-Ambassador/Qwen3.8-Omni-Flash",
+      "can": [
+        "JSON mode",
+        "answers",
+        "thinking off",
+        "two system messages"
+      ]
+    }
+  },
+  "answers": {
+    "Qwen3.7-Max": 653,
+    "Qwen3.7-Plus": 580,
+    "Qwen3.8-27B": 9872,
+    "Qwen3.8-Flash-Next": 799,
+    "Qwen3.8-Max": 297,
+    "Qwen3.8-Omni-Flash": 345,
+    "endpoint": 1
+  },
+  "fingerprints": {
+    "suite": "546b6a4cb486c895",
+    "ruleset": "688b204efa8a2738",
+    "fence": "90ab1dd4106c",
+    "preregistration": "e150f88d7ab7aa8c"
+  },
+  "python": "3.12.14",
+  "packages": {
+    "numpy": "2.5.3",
+    "matplotlib": "3.11.2",
+    "ipywidgets": "8.1.9",
+    "nbclient": "0.11.0",
+    "nbformat": "5.11.1"
+  },
+  "shipped": {
+    "system": "lean-agent",
+    "level": "full",
+    "ruleset": "688b204efa8a2738",
+    "removed": [
+      "read first",
+      "prove it",
+      "how to answer",
+      "project map",
+      "read gate",
+      "sibling scan",
+      "dependency gate"
+    ],
+    "dropped_sections": [
+      "Read first",
+      "Prove it",
+      "How to answer"
+    ],
+    "off_flags": {
+      "map": true,
+      "read_gate": true,
+      "siblings": true,
+      "deps": true
+    },
+    "never_removed": [
+      "never cut"
+    ],
+    "evidence": "exp_ablation.json"
+  },
+  "replicas": 2,
+  "max_turns": 20,
+  "temperature": 0.6
+}

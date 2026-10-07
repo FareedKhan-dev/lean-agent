@@ -1,0 +1,14 @@
+{
+  "id": "ob-expense-totals",
+  "title": "Expense totals per category",
+  "category": "over-build",
+  "split": "held-out",
+  "axis": "quality",
+  "rung": 3,
+  "entry": "expenses.py",
+  "requirements": [],
+  "python_target": "3.12",
+  "prompt": "Implement `totals_by_category(path)` in expenses.py: read the expenses CSV at `path` (columns date, category, amount, with amounts like 12.30) and return the total spent per category. reconcile.py uses it every month to check our books against the bank statement.",
+  "notes": "csv plus decimal.Decimal, matching the Decimal figures reconcile.py already reads from the bank. The lazy-wrong version sums floats, so 0.10 + 0.20 never equals the bank's 0.30 and every month shows false mismatches. The bloated version wraps Decimal in a Money class and a ledger; reaching for pandas, which this project does not depend on, fails the import check.",
+  "extension": "Add `totals_by_month(path)`: the total per month and category, keyed like ('2026-03', 'travel')."
+}

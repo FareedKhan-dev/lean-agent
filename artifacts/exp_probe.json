@@ -1,0 +1,50 @@
+{
+  "models": {
+    "Qwen3.7-Max": {
+      "answers": true,
+      "thinking off": true,
+      "two system messages": true,
+      "JSON mode": true,
+      "reasoning": 594
+    },
+    "Qwen3.7-Plus": {
+      "answers": true,
+      "thinking off": true,
+      "two system messages": true,
+      "JSON mode": true,
+      "reasoning": 638
+    },
+    "Qwen3.8-27B": {
+      "answers": true,
+      "thinking off": true,
+      "two system messages": true,
+      "JSON mode": true,
+      "reasoning": 159
+    },
+    "Qwen3.8-Flash-Next": {
+      "answers": true,
+      "thinking off": true,
+      "two system messages": true,
+      "JSON mode": true,
+      "reasoning": 110
+    },
+    "Qwen3.8-Max": {
+      "answers": true,
+      "thinking off": true,
+      "two system messages": true,
+      "JSON mode": true,
+      "reasoning": 113
+    },
+    "Qwen3.8-Omni-Flash": {
+      "answers": true,
+      "thinking off": true,
+      "two system messages": true,
+      "JSON mode": true,
+      "reasoning": 158
+    }
+  },
+  "all_answer": true,
+  "two_system_ok": 6,
+  "json_ok": 6,
+  "n": 6
+}

@@ -1,0 +1,14 @@
+{
+  "id": "ob-settings-defaults",
+  "title": "Load settings over defaults",
+  "category": "over-build",
+  "split": "dev",
+  "axis": "quality",
+  "rung": 3,
+  "entry": "settings.py",
+  "requirements": [],
+  "python_target": "3.12",
+  "prompt": "Implement `load_settings(path)` in settings.py: read the JSON file at `path` and return the settings, using DEFAULTS for anything the file does not set. If the file does not exist, use the defaults. If the file is not valid JSON, or is not a JSON object, fail with a ValueError whose message names the file.",
+  "notes": "json plus one dict merge plus two checks. The lazy-wrong version merges blindly and crashes with an anonymous error on null or a list; the bloated version builds a typed settings class with environment overrides.",
+  "extension": "Let an environment variable APP_THEME override the theme from the file."
+}

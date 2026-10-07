@@ -1,0 +1,14 @@
+{
+  "id": "ex-signup-rules",
+  "title": "Sign-up form rules, all of them",
+  "category": "explicit",
+  "split": "dev",
+  "axis": "correct",
+  "rung": 7,
+  "entry": "signup.py",
+  "requirements": [],
+  "python_target": "3.12",
+  "prompt": "Implement `validate_signup(form)` in signup.py. `form` is the dict of strings posted by the sign-up page (a missing field counts as empty). Return the list of error messages, empty if the form is fine. Product signed off these rules and messages, and the page shows every message at once, so check every rule and report each one that fails, in this order:\n1. 'username must be 3 to 20 characters'\n2. 'username may only use letters, digits and _' (letters means a-z and A-Z)\n3. 'email address is not valid': it needs exactly one @, something before it, and a dot after it that is neither the first nor the last character of the domain\n4. 'password must be at least 12 characters'\n5. 'password needs a letter and a digit'\n6. 'password must not contain the username' (ignoring case; only when a username was given)\n7. 'age must be a whole number from 13 to 120' (age is optional; an empty age is fine)",
+  "notes": "An explicit request: seven rules, seven messages, every failure reported. The lazy-wrong version returns only the first problem and cuts the password and age rules; the bloated version builds a rule engine with a registry decorator.",
+  "extension": "Usernames must be unique: take the set of existing usernames and add 'username is taken' (ignoring case) after rule 2."
+}

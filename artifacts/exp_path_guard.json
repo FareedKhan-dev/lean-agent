@@ -1,0 +1,6 @@
+{
+  "fuzz": 3000,
+  "refused": 2361,
+  "inside": 639,
+  "escapes": 0
+}

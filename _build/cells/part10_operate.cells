@@ -1,0 +1,832 @@
+#%% md
+# Part X - Operating it: cost, watching it work, and your own code
+
+The system has been built, measured and doubted. This Part is about using it.
+
+**Where this sits.** Everything so far happened on fixtures we wrote. This Part covers what someone running the system needs to know: where the time and the tokens go, what the measured saving costs, how to watch an episode or drive the host by hand, and, the point of the whole exercise, how to point the agent at a folder of your own and get back a patch you can review. It ends by turning the notebook's tools on its own code, with an adoption guide for teams, the steps to reproduce every number, and a manifest of what produced them.
+
+**By the end of this Part you can** read an agent's cost per episode and per line saved, browse any recorded episode, run the system on a folder of your own without risking the folder, check the patch it returns, decide which tier of the system to adopt, and reproduce this notebook from its ledger.
+
+{{diagram:part10_map}}
+
+#%% md
+## S92 - Where the time and the tokens go
+
+**Theory.** An agent's cost has three parts: the model's time, the tokens sent and received, and the host's own overhead (hooks, gates, the fence). The first two come from the episodes and the ledger. The third is measured by replaying three dev episodes of the full system, whose model calls all come from the ledger, so that the clock sees only the host: every hook call is timed by the event bus (S16) and set against the model time the same episodes recorded. The rules also carry a fixed tax, their tokens in the system message of every call, and that is computed directly.
+
+**In plain terms.** How long the agents took, how many tokens they used, and how much of that is our machinery rather than the model.
+
+#%% code
+COST_ROWS = []                                          # one row per arm, every number a median over its episodes
+for arm in ARM_NAMES:
+    eps = [r.episode for r in MAIN if r.arm == arm and r.episode]   # the arm's episodes; failed runs have none
+    COST_ROWS.append({"arm": arm, "episodes": len(eps),
+                      "turns": np.median([len(e.turns) for e in eps]),
+                      "model s": np.median([e.model_seconds for e in eps]),          # time spent waiting on the model
+                      "tokens in": np.median([sum(t.prompt_tokens for t in e.turns) for e in eps]),
+                      "tokens out": np.median([sum(t.completion_tokens for t in e.turns) for e in eps]),
+                      "reasoning": np.median([sum(t.reasoning_chars for t in e.turns) for e in eps])})   # thinking, in characters
+table(COST_ROWS, [("arm", "arm", ""), ("episodes", "episodes", "d"), ("turns", "turns", ".0f"), ("model s", "model seconds", ".0f"),
+                  ("tokens in", "tokens in", ".0f"), ("tokens out", "tokens out", ".0f"), ("reasoning", "reasoning chars", ".0f")])
+
+#%% md
+**Every model the notebook called, from the ledger.** The ledger records each answer with its tokens and its time, so the whole notebook's bill, the judges and the probes included, is one query away.
+
+#%% code
+print("\n  per model, from the ledger:")
+per_model = LEDGER.query("SELECT model, COUNT(*), SUM(prompt_tokens), SUM(completion_tokens), AVG(seconds) "
+                         "FROM calls GROUP BY model ORDER BY COUNT(*) DESC")      # the busiest model first
+model_rows = []
+for m, n, pi, po, s in per_model:
+    # a model with nothing recorded comes back as None: shown as 0
+    model_rows.append({"model": m.split("/")[-1], "calls": n, "in": pi or 0, "out": po or 0, "seconds": s or 0})
+table(model_rows, [("model", "model", ""), ("calls", "calls", "d"), ("in", "tokens in", "d"), ("out", "tokens out", "d"),
+                   ("seconds", "mean seconds", ".1f")])
+
+#%% code
+timing = []
+for t in DEV[:3]:                                       # three dev tasks, run again by the full system
+    h = Host(plugins=full_system(), label="timing")
+    ep = run_episode(t, h)                              # model time comes from the replies; hook time is measured here
+    hook_ms = sum(x["ms"] for x in h.bus.trace)         # the event bus timed every hook call it made
+    timing.append({"task": t.id, "turns": len(ep.turns), "model s": ep.model_seconds, "hook ms": hook_ms,
+                   "share": hook_ms / 1000 / max(ep.model_seconds, 1e-9),     # hooks as a share of model time; never divide by 0
+                   "hook calls": len(h.bus.trace)})
+table(timing, [("task", "task", ""), ("turns", "turns", "d"), ("model s", "model seconds", ".1f"), ("hook calls", "hook calls", "d"),
+               ("hook ms", "hook time ms", ".0f"), ("share", "hooks / model", ".1%")])
+
+#%% md
+**The rules' fixed tax.** The ruleset at level full sits in the system message of every call, so its token count is paid once per turn, whatever the turn does.
+
+#%% code
+rules_tax = tokens_of(ruleset("full"))                  # tokens the rules add to every system message
+full_calls = np.median([len(r.episode.turns) for r in MAIN if r.arm == "full" and r.episode])   # one call per turn
+print(f"\n  the rules' fixed tax: {rules_tax} tokens in every system message, about {rules_tax * full_calls:,.0f} tokens "
+      f"over a median full-system episode of {full_calls:.0f} calls")
+hook_share = float(np.mean([x["share"] for x in timing]))     # the hooks' share of model time, over the three episodes
+save_exp("cost", {r["arm"]: {k: r[k] for k in ("turns", "model s", "tokens in", "tokens out", "reasoning")} for r in COST_ROWS}
+         | {"hook_share": hook_share, "rules_tax": rules_tax, "hooks": "SMALL" if hook_share < 0.05 else "NOTICEABLE"})
+
+#%% code
+# FIG  time and tokens per episode
+fig, axes = plt.subplots(1, 2, figsize=(10.5, 3.3))
+for ax, key, label in ((axes[0], "model_seconds", "model seconds per episode"), (axes[1], "tokens", "tokens per episode")):
+    for i, arm in enumerate(ARM_NAMES):
+        eps = [r.episode for r in MAIN if r.arm == arm and r.episode]
+        vals = []                                           # one value per episode, zeros left out
+        for e in eps:
+            if key == "model_seconds":
+                v = e.model_seconds                         # what a user waits for
+            else:
+                v = sum(t.prompt_tokens + t.completion_tokens for t in e.turns)   # what a provider charges for
+            if v > 0:
+                vals.append(v)                              # a log scale has no place for zero
+        if not vals:
+            continue
+        # every episode as a grey dot, spread sideways by a generator seeded per arm, so the picture never changes
+        ax.scatter(i + np.random.default_rng(i).uniform(-0.18, 0.18, len(vals)), vals, s=7, color=GRID, zorder=1)
+        ax.scatter([i], [np.median(vals)], s=60, color=C1 if arm == "full" else INK2, zorder=2)   # the median, on top
+    ax.set_xticks(range(len(ARM_NAMES)), ARM_NAMES)
+    ax.set_yscale("log")                                    # episodes differ by orders of magnitude
+    panel(ax, label + "; the dot is the median")
+COST = {r["arm"]: r for r in COST_ROWS}                     # the cost table by arm, also used in S96
+finish(fig, "s92_cost", f"A full-system episode takes a median {COST['full']['model s']:.0f} s of model time, "
+       f"the unguided agent {COST['off']['model s']:.0f} s", "every episode of the main experiment; log scales")
+
+#%% md
+**Reading FIG 24 (s92_cost).** Each grey dot is one episode, and the dark dot is the arm's median. The left panel is model time, which is what a user waits for; the right panel is tokens in and out, which is what a provider charges for. The full system's median episode used {{exp:cost.full.model s:.0f}} seconds of model time against {{exp:cost.off.model s:.0f}} for the unguided agent. Every hook it runs together cost {{exp:cost.hook_share:.1%}} of the model time in the three replayed episodes, {{pick:cost.hooks|SMALL=so the machinery itself is not where the time goes|NOTICEABLE=which is enough to matter on a slow machine or a large project, and the first place to look for savings}}. The tokens are the real cost: the rules add {{exp:cost.rules_tax}} tokens to every call's system message, and the gates and the critic add turns and a review call.
+
+#%% md
+## S93 - What the saving costs
+
+**Theory.** The system spends something (tokens, turns, a review call) to write less code. Whether that is a good trade depends on what a line of code costs a team, which this notebook cannot know, so the table states the exchange rate: extra tokens per line not written, from the medians of the main experiment. A provider's price per thousand tokens can be set in S0 (`COST_PER_1K_TOKENS`) to turn tokens into money; it is left unset, because prices change faster than any notebook.
+
+**In plain terms.** How many extra tokens the system spends for each line of code it avoids.
+
+#%% md
+**`med(arm, f)`** is the median of some quantity `f` over an arm's scored episodes in the main experiment. The exchange rate below is built from medians rather than means, so one runaway episode cannot set the price.
+
+#%% code
+def med(arm, f):
+    """The median of f(run) over an arm's scored runs that have an episode."""
+    values = [f(r) for r in MAIN if r.arm == arm and r.score and r.episode]   # failed runs have nothing to measure
+    return float(np.median(values))
+
+show_def(med, layer="lab")
+
+#%% md
+**`tokens(r)`** is everything one run sent to the model and got back: prompt and completion tokens, summed over its turns. The prompt side dominates, because every turn resends the conversation so far.
+
+#%% code
+def tokens(r):
+    """Prompt plus completion tokens over every turn of a run's episode."""
+    return sum(t.prompt_tokens + t.completion_tokens for t in r.episode.turns)
+
+show_def(tokens, layer="lab")
+
+#%% code
+print(f"[tokens] median tokens per episode: the unguided agent {med('off', tokens):,.0f}, the full system {med('full', tokens):,.0f}")
+
+#%% md
+**The exchange rate.** For each arm, the extra tokens it spends per episode against the unguided agent, the lines of code it saves, and the ratio of the two. A negative number of extra tokens means the arm spent fewer.
+
+#%% code
+rows = []
+for arm in ARM_NAMES:
+    if arm == "off":
+        continue                                            # the baseline every other arm is priced against
+    extra = med(arm, tokens) - med("off", tokens)           # extra tokens per episode
+    saved = med("off", lambda r: r.score.added_code) - med(arm, lambda r: r.score.added_code)   # lines not written
+    rows.append({"arm": arm, "extra tokens": extra, "lines saved": saved,
+                 "tokens per line": extra / saved if saved > 0 else None,     # no rate when nothing was saved
+                 "price": (extra / 1000 * COST_PER_1K_TOKENS) if COST_PER_1K_TOKENS else None})   # money, if S0 sets a price
+table(rows, [("arm", "arm", ""), ("extra tokens", "extra tokens per episode", "+.0f"), ("lines saved", "lines saved per episode", "+.1f"),
+             ("tokens per line", "tokens per line saved", ".0f"), ("price", "extra cost per episode", ".4f")])
+print("\n  " + ("prices from COST_PER_1K_TOKENS" if COST_PER_1K_TOKENS else
+                "set COST_PER_1K_TOKENS in S0 to see money instead of tokens; a negative 'extra' means the arm used fewer tokens"))
+save_exp("tradeoff", {r["arm"]: {"extra_tokens": r["extra tokens"], "lines_saved": r["lines saved"],
+                                "tokens_per_line": r["tokens per line"]} for r in rows})
+
+#%% md
+For the full system, the median episode used {{exp:tradeoff.full.extra_tokens:+,.0f}} tokens compared with the unguided agent, and the median change was {{exp:tradeoff.full.lines_saved:+.1f}} lines smaller (a negative number would mean larger). Medians of differences and differences of medians are not the same thing, so read this as an order of magnitude, not an invoice. The comparison that matters for a team is between those tokens and the minutes a reviewer spends on each needless line, now and every time the code is read again.
+
+**For teams.** Measure the trade on your own work before deciding. The cheapest experiment is the one in S64 at a smaller scale: a dozen of your own tickets, worked with and without the system, sizes and pass rates compared ticket by ticket.
+
+#%% md
+## S94 - Watching it work
+
+**Theory.** Two tools for looking inside. The **episode browser** shows any recorded episode of the main experiment: every turn, what the agent did, whether a gate refused it, the score and the final diff. The **console** is the host itself, driven by hand: commands answer straight away without a model (`/{{CMD}} status`, a level switch, the help card, the debt ledger), and a ticket typed into it runs the agent live. In a replayed notebook only the commands work, because a new ticket would need a call the ledger does not hold; the console says so instead of failing.
+
+**In plain terms.** Pick any recorded run and watch it step by step, or talk to the system yourself.
+
+#%% code
+# the full system's first run of ob-postcode-cache, printed turn by turn
+r0 = next(r for r in MAIN if r.arm == "full" and r.task == "ob-postcode-cache" and r.replica == 0)
+print("[browser] the static view of one episode (the widget below can show any of them):")
+if r0.episode:
+    show_episode(r0.episode)
+print(f"  score: {r0.score.short() if r0.score else r0.error}")
+
+#%% md
+**The episode browser.** In a live session, three menus pick a task, an arm and a run, and the panel shows that episode with its score and its final diff. A headless run prints its fallback line instead.
+
+#%% code
+W = widgets()                                           # None in a headless run
+if W:
+    task_box = W.Dropdown(options=sorted(SUITE), value="ob-postcode-cache", description="task")
+    arm_box = W.Dropdown(options=list(ARM_NAMES), value="full", description="arm")
+    rep_box = W.Dropdown(options=list(range(REPLICAS)), value=0, description="run")
+    out = W.Output(layout={"border": "1px solid #e6e5e1", "max_height": "420px", "overflow": "auto"})   # scrolls when long
+
+    def _browse(change=None):
+        out.clear_output()
+        with out:
+            # the run matching all three menus, if the main experiment recorded one
+            r = next((r for r in MAIN if (r.task, r.arm, r.replica) == (task_box.value, arm_box.value, rep_box.value)), None)
+            if r is None or r.episode is None:
+                print("no episode recorded for this choice" + (f" ({r.error})" if r else ""))
+                return
+            show_episode(r.episode)
+            print(f"score: {r.score.short() if r.score else r.error}\n")
+            print(change_diff(SUITE[r.task].seed, snapshot(r.episode.ws)) or "(no change)")
+
+    for box in (task_box, arm_box, rep_box):
+        box.observe(_browse, names="value")             # any menu change shows the new episode
+    _browse()                                           # the default episode, before anything is clicked
+    display(W.VBox([W.HBox([task_box, arm_box, rep_box]), out]))
+else:
+    print("(no widget in this run, which needs a live Jupyter session; the episode above is the static view)")
+
+#%% md
+**The console** is the shipped host, started on a copy of `ob-postcode-cache` and driven by hand. Commands are answered by the host itself, so none of them reaches a model: the sequence below switches levels, tries an option that does not exist, turns the system off and on again, and asks for the help card.
+
+#%% code
+CONSOLE = Host(plugins=shipped_system(), label="console")                      # the system as S71 ships it
+CONSOLE.start_session(materialise(SUITE["ob-postcode-cache"], WS_DIR / "console"))
+print("[console] commands answer without a model:")
+for line in (f"/{CMD} status", f"/{CMD} ultra", f"/{CMD} status", f"/{CMD} lite now", f"/{CMD} off", f"/{CMD}", f"/{CMD}-help"):
+    print(f"  > {line}")
+    print(textwrap.indent(str(CONSOLE.handle_prompt(line)), "    "))           # what the host answered
+print(f"  statusline: {CONSOLE.status()}")
+
+#%% md
+**`console_send(text)`** is the console's single entry point. A line that starts with `/` is a command and is answered at once. Anything else is a ticket: it joins the conversation and the agent works it, which needs live calls, so in a replayed notebook the console says that plainly instead of failing on a request the ledger has never seen.
+
+#%% code
+def console_send(text):
+    """A command answers at once; a ticket runs the agent, unless this notebook is a replay."""
+    if text.startswith("/"):
+        return str(CONSOLE.handle_prompt(text))                     # a command never reaches a model
+    if LEAN_MODE == "replay":
+        # a new ticket would need answers the ledger does not hold
+        return "live calls are off in a replayed notebook; run it in collect mode to talk to the agent"
+    CONSOLE.handle_prompt(text)                                     # the ticket joins the conversation
+    res = CONSOLE.loop(CONSOLE.ctx, CONSOLE.ws, CONSOLE.model, tag="console")
+    CONSOLE.last_turns = res.turns                                  # the statusline reads its turn count from here
+    return f"{res.stop} after {len(res.turns)} turns: {plain(res.done_text)}"
+
+show_def(console_send, layer="lab")
+
+#%% code
+print(f"[console_send] /{CMD} status: {console_send(f'/{CMD} status')}")    # a command: answered by the host alone
+
+#%% md
+**The console as a widget.** A text box that sends each line through `console_send` and prints the answer with the statusline; without a live session, call `console_send` directly.
+
+#%% code
+W = widgets()                                                       # None in a headless run
+if W:
+    box = W.Text(placeholder=f"/{CMD} status, or a ticket", continuous_update=False, layout={"width": "70%"})
+    out = W.Output(layout={"border": "1px solid #e6e5e1", "max_height": "300px", "overflow": "auto"})
+
+    def _send(change):
+        text = change["new"].strip()
+        if not text:
+            return                                                  # clearing the box below fires this again, with ""
+        with out:
+            print(f"> {text}\n{console_send(text)}\n[{CONSOLE.status()}]")
+        box.value = ""                                              # ready for the next line
+
+    box.observe(_send, names="value")                               # runs on Enter, since continuous_update is off
+    display(W.VBox([box, out]))
+else:
+    print("(no widget in this run, which needs a live Jupyter session; call console_send('...') directly)")
+
+#%% md
+## S94b - Use it on your own code
+
+**Theory.** Everything in this notebook was built to be pointed at real code eventually, and `run_on_folder(path, ticket)` is that last step. It treats your folder as read-only. The folder is copied into a fresh workspace, leaving out version control, virtual environments, dependency folders and caches, binary files, anything that is not UTF-8 text and anything over a size limit, and every skip is reported with its reason. The shipped system from S71 works the ticket on the copy, inside the fence, which cannot write outside the copy. The result is a **patch** in the standard unified format, which `git apply` understands, and a short **report** listing:
+- the step of the ladder the agent stopped at;
+- what it left out, and when to build it;
+- the shortcuts it marked;
+- what the critic said;
+- what the gates refused;
+- how much code it added.
+
+Four checks run on every call:
+1. The folder's fingerprint (a hash of every file) is the same before and after.
+2. The patch applied to a fresh copy reproduces the agent's result line for line.
+3. A program in the workspace cannot write into your folder.
+4. An unreadable file is reported, never crashed on.
+
+**In plain terms.** Give it a folder and a ticket. It works on a copy, never touches your files, and hands back a patch and a short report for you to review.
+
+**Your folder is only ever read.** Everything happens on a copy inside the fence, and what comes back is a patch you apply yourself. The four checks run on every call, not only in this demo.
+
+{{diagram:folder}}
+
+#%% md
+**`SKIP_DIRS` and `MAX_FILE_BYTES`** name what is never copied out of your folder: version control, virtual environments, dependency folders, caches and editor settings by name, and any file over 200 kB by size. None of them is source the agent should edit, and some (a `.venv`, a `node_modules`) would bury the project under thousands of files.
+
+#%% code
+# version control, environments, dependencies, caches and editor settings
+SKIP_DIRS = {".git", ".hg", ".svn", ".venv", "venv", "env", "node_modules", "__pycache__", ".mypy_cache", ".pytest_cache",
+             ".ruff_cache", ".tox", ".idea", ".vscode"}
+MAX_FILE_BYTES = 200_000                                     # larger than any source file worth giving an agent
+print(f"[copy] folders never copied: {', '.join(sorted(SKIP_DIRS))}")
+print(f"[copy] files over {MAX_FILE_BYTES // 1000} kB are left behind")
+
+#%% md
+**`copy_project(src, dest)`** builds the agent's workspace from your folder. It walks the folder once, prunes the tool and environment folders before descending into them, and copies only files that are ordinary UTF-8 text: a link is never followed, a large file never read, a file with a zero byte near the start is treated as binary, and one that does not decode as UTF-8 is left behind rather than garbled. Every skip is returned with its reason, so the report can say exactly what the agent did not see.
+
+#%% code
+def copy_project(src, dest):
+    """Copy a project's text files into an empty workspace, leaving out tool and environment
+    folders, links, binaries, non-UTF-8 files and anything over MAX_FILE_BYTES. Returns the
+    skipped paths with the reason for each."""
+    src = Path(src)                                          # both may arrive as strings
+    dest = Path(dest)
+    skipped = []                                             # (path, reason) for everything left behind
+    shutil.rmtree(dest, ignore_errors=True)                  # the workspace starts empty every time
+    dest.mkdir(parents=True)
+    for root, dirs, files in os.walk(src):                    # top down, one folder at a time
+        here = Path(root)                                    # the folder being walked
+        for d in dirs:
+            if d in SKIP_DIRS:                               # reported with a trailing slash: a whole folder
+                skipped.append(((here / d).relative_to(src).as_posix() + "/", "tool or environment folder"))
+        dirs[:] = sorted(d for d in dirs if d not in SKIP_DIRS)    # pruned in place, so os.walk never goes inside
+        for name in sorted(files):                           # sorted, so every run copies in the same order
+            p = here / name
+            rel = p.relative_to(src).as_posix()              # the path as the patch will name it
+            # a link is never followed and a large file never read; both are skipped below
+            data = b"" if p.is_symlink() or p.stat().st_size > MAX_FILE_BYTES else p.read_bytes()
+            if p.is_symlink():
+                why = "a link"                               # it could point anywhere, inside the folder or out
+            elif p.stat().st_size > MAX_FILE_BYTES:
+                why = f"over {MAX_FILE_BYTES // 1000} kB"
+            elif b"\0" in data[:4096]:
+                why = "binary"                               # text files do not contain zero bytes
+            else:
+                why = None
+            if why is None:
+                try:
+                    text = data.decode("utf-8")              # the only bytes that get copied
+                except UnicodeDecodeError:
+                    why = "not UTF-8 text"                   # a legacy encoding the agent's tools would garble
+            if why:
+                skipped.append((rel, why))                   # reported, never copied
+                continue
+            (dest / rel).parent.mkdir(parents=True, exist_ok=True)   # the same folders as in the original
+            (dest / rel).write_text(text, encoding="utf-8", newline="")    # newline="": line endings kept as they were
+    return skipped
+
+show_def(copy_project, layer="lab")
+
+#%% md
+**`folder_fingerprint(path)`** is one hash over every file in a folder, its relative path and its bytes. Taken before a run and again after, it proves the folder was not touched: a single changed byte, an added file or a renamed one gives a different hash. Unlike the copy, it covers everything, `.git` included, because the promise is about the whole folder.
+
+#%% code
+def folder_fingerprint(path):
+    """A hash of every file's path and bytes: the same before and after, or the folder was touched."""
+    h = hashlib.sha256()
+    for p in sorted(Path(path).rglob("*")):                  # sorted, so the hash does not depend on listing order
+        if p.is_file():
+            # the path, then the bytes, each closed by a zero byte so two files can never run together
+            h.update(p.relative_to(path).as_posix().encode() + b"\0" + p.read_bytes() + b"\0")
+    return h.hexdigest()
+
+show_def(folder_fingerprint, layer="lab")
+
+#%% md
+Both at work on a two-file scratch project: the copy leaves `.git` behind, copying leaves the original's fingerprint alone, and a one-character edit changes it.
+
+#%% code
+copy_demo = RUNTIME / "demo" / "copy_project"                # a scratch project, rebuilt on every run
+shutil.rmtree(copy_demo, ignore_errors=True)
+(copy_demo / ".git").mkdir(parents=True)
+(copy_demo / ".git" / "HEAD").write_text("ref: refs/heads/main\n", encoding="utf-8")
+(copy_demo / "app.py").write_text("print('hello')\n", encoding="utf-8")
+fp_before = folder_fingerprint(copy_demo)                    # before anything is copied
+print(f"[copy] skipped: {copy_project(copy_demo, RUNTIME / 'demo' / 'copy_project_ws')}")
+print(f"[copy] in the workspace: {sorted(snapshot(RUNTIME / 'demo' / 'copy_project_ws'))}")
+print(f"[fingerprint] the original is unchanged by copying: {folder_fingerprint(copy_demo) == fp_before}")
+(copy_demo / "app.py").write_text("print('hello!')\n", encoding="utf-8")   # one character added
+print(f"[fingerprint] unchanged after a one-character edit: {folder_fingerprint(copy_demo) == fp_before}")
+
+#%% md
+**`make_patch(before, after)`** turns two versions of a project, each a `{path: text}` dict, into one unified diff that `git apply` accepts. A created file is diffed from `/dev/null` and a deleted one to it, which is git's own spelling, and unchanged files stay out. An empty file has no lines to diff, so its creation or deletion is written the way git writes it, a `diff --git` header with the file's mode and no hunk, placed after every ordinary section because git reads everything below such a header as part of it. The patch ends with a newline, as patch files do; no change at all gives an empty string.
+
+#%% code
+def make_patch(before, after):
+    """A unified diff, in the format git apply reads, of every text file that was created, changed or deleted."""
+    out = []
+    empty = []                                               # empty files created or deleted: they go last
+    for path in sorted(set(before) | set(after)):            # every path on either side, in a stable order
+        a, b = before.get(path), after.get(path)             # None on one side: the file was created or deleted
+        if a == b:
+            continue                                         # an unchanged file stays out of the patch
+        if not a and not b:                                  # an empty file created or deleted: no lines to diff
+            # git's own spelling for that: a header naming the file and its mode, and no hunk; it goes at
+            # the end, because git reads every line after such a header as part of it, up to the next one
+            empty += [f"diff --git a/{path} b/{path}", "new file mode 100644" if a is None else "deleted file mode 100644"]
+            continue
+        old_name = "/dev/null" if a is None else f"a/{path}" # git's names for "no file here" and for each side
+        new_name = "/dev/null" if b is None else f"b/{path}"
+        # three lines of context, the default, which is what git apply matches against
+        out += difflib.unified_diff((a or "").splitlines(), (b or "").splitlines(), old_name, new_name, lineterm="")
+    out += empty                                             # after every ordinary section
+    if not out:
+        return ""                                            # no change, no patch
+    return "\n".join(out) + "\n"
+
+show_def(make_patch, layer="lab")
+
+#%% code
+patch_demo = make_patch({"a.py": "x = 1\ny = 2\n"},                          # one changed line...
+                        {"a.py": "x = 1\ny = 3\n", "b.py": "print('new')\n"})   # ...and one new file
+print(patch_demo)
+
+#%% md
+**`HUNK`** reads the header of one hunk, `@@ -start,count +start,count @@`: where the hunk starts in the old file and how many old lines it covers, then the same for the new file. A count of 1 is often left out, and a pure insertion has an old count of 0.
+
+#%% code
+HUNK = re.compile(r"@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@")    # old start, old count, new start, new count
+for header in ("@@ -1,2 +1,2 @@", "@@ -0,0 +1 @@"):
+    print(f"[hunk] {header!r} reads as {HUNK.match(header).groups()}")
+
+#%% md
+**`empty_file_header(lines, i)`** recognises the one kind of section that has no hunk: an empty file that was created or deleted, written as git's `diff --git` header and a mode line. It returns the path and which way the change went, or `None` for anything else, so `apply_patch` below can deal with it before reading ordinary sections.
+
+#%% code
+def empty_file_header(lines, i):
+    """(path, created) if patch line i opens git's header for an empty file that was created or
+    deleted, a header with a mode line and no hunk; None for anything else."""
+    if not (lines[i].startswith("diff --git ") and i + 1 < len(lines)):
+        return None                                          # not a git header at all
+    if lines[i + 1] not in ("new file mode 100644", "deleted file mode 100644"):
+        return None                                          # a header for some other kind of change
+    if i + 2 < len(lines) and lines[i + 2].startswith("--- "):
+        return None                                          # a file with lines: the usual section follows
+    return lines[i].split(" b/", 1)[1], lines[i + 1].startswith("new")
+
+show_def(empty_file_header, layer="lab")
+
+#%% code
+header_demo = ["diff --git a/pkg/__init__.py b/pkg/__init__.py", "new file mode 100644"]
+print(f"[empty_file_header] {empty_file_header(header_demo, 0)}")          # the path, and created
+print(f"[empty_file_header] {empty_file_header(['--- a/x.py', '+++ b/x.py'], 0)}")   # an ordinary section
+
+#%% md
+**`apply_patch(files, patch)`** is the other half: it applies a unified diff to a `{path: text}` dict and returns the new dict, leaving the input alone. It walks the patch one file section at a time and each hunk line by line, copying untouched lines across, checking every context and removed line against the old file, and adding the new lines. A file whose new side is `/dev/null` is removed, not left behind empty. The one idea that matters is strictness: a line that does not match exactly raises `ValueError` instead of being applied approximately, because a patch that only nearly applies is not the patch that was reviewed.
+
+#%% code
+def apply_patch(files, patch):
+    """Apply a unified diff to {path: text}. A hunk that does not match exactly raises
+    ValueError: a patch that applies only approximately is not the patch that was reviewed."""
+    out = dict(files)                                        # a copy: the caller's dict is never changed
+    lines = patch.splitlines()
+    i = 0                                                    # the patch line being read
+    while i < len(lines):
+        header = empty_file_header(lines, i)                 # an empty file created or deleted
+        if header:
+            path, created = header
+            if created:
+                out[path] = ""                               # it exists, with nothing in it
+            else:
+                out.pop(path, None)                          # it is gone
+            i += 2                                           # past the header and its mode line
+            continue
+        # a file section opens with a "--- " line directly followed by a "+++ " line
+        if not (lines[i].startswith("--- ") and i + 1 < len(lines) and lines[i + 1].startswith("+++ ")):
+            i += 1
+            continue
+        deleted = lines[i + 1][4:] == "/dev/null"            # the new side is "no file here"
+        # the new name, unless the file was deleted and only the old name is left
+        target = lines[i][4:] if deleted else lines[i + 1][4:]
+        path = target.split("/", 1)[1]                       # without its a/ or b/ prefix
+        old = (out.get(path) or "").splitlines()             # a new file starts from nothing
+        new = []                                             # the file as rebuilt so far
+        pos = 0                                              # the next old line not yet copied or consumed
+        i += 2                                               # past the two header lines
+        while i < len(lines) and (m := HUNK.match(lines[i])):
+            n_old, n_new = int(m.group(2) or 1), int(m.group(4) or 1)    # lines the hunk takes and gives
+            start = int(m.group(1)) - 1 if n_old else int(m.group(1))   # 1-based; an insertion names the line before it
+            new = new + old[pos:start]                       # the untouched lines before the hunk come across as they are
+            pos = start
+            i += 1
+            while n_old or n_new:
+                tag, text = lines[i][:1], lines[i][1:]       # " " context, "-" removed, "+" added
+                if tag in (" ", "-"):
+                    if pos >= len(old) or old[pos] != text:
+                        raise ValueError(f"{path}: the patch does not match line {pos + 1}")   # exact, or not at all
+                    pos, n_old = pos + 1, n_old - 1
+                if tag in (" ", "+"):
+                    new.append(text)
+                    n_new -= 1
+                i += 1
+        new += old[pos:]                                     # whatever follows the last hunk
+        if deleted:
+            out.pop(path, None)                              # a deleted file leaves the project
+        else:
+            out[path] = "\n".join(new) + "\n" if new else "" # files end with a newline; an emptied file is ""
+    return out
+
+show_def(apply_patch, layer="lab")
+
+#%% md
+**Both halves, tested together.** A patch must rebuild exactly the files it was made from, must be refused once the file underneath it has changed, and an unchanged project must give an empty patch.
+
+#%% code
+results = []                                                 # expect() records each test here
+before = {"a.py": "x = 1\ny = 2\nz = 3\n", "keep.txt": "same\n"}
+after = {"a.py": "x = 1\ny = 20\nz = 3\nw = 4\n", "keep.txt": "same\n", "new/b.py": "print('hi')\n"}   # a change, an addition, a new file
+p = make_patch(before, after)
+expect("a patch reproduces the files it was made from", apply_patch(before, p) == after)
+try:
+    apply_patch({**before, "a.py": "x = 1\ny = 3\nz = 3\n"}, p)    # the line the patch removes has changed since
+    refused = False
+except ValueError:
+    refused = True
+expect("a patch that no longer matches is refused", refused)
+expect("an empty change is an empty patch", make_patch(before, before) == "")
+with_package = {**after, "new/__init__.py": ""}                          # an empty file, as packages have
+expect("an empty new file survives the round trip", apply_patch(before, make_patch(before, with_package)) == with_package)
+without_keep = {p: s for p, s in after.items() if p != "keep.txt"}      # a file the change deleted
+expect("a deleted file is gone after the patch, not left empty", apply_patch(after, make_patch(after, without_keep)) == without_keep)
+
+#%% md
+**`same_lines(a, b)`** compares two `{path: text}` dicts line by line. The patches made here do not record whether a file ended with a newline, so a file rebuilt from one always ends with one; comparing lines rather than raw text keeps that one missing character from counting as a difference.
+
+#%% code
+def same_lines(a, b):
+    """Two sets of files with the same lines; a missing newline at the very end is not a difference."""
+    return {p: s.splitlines() for p, s in a.items()} == {p: s.splitlines() for p, s in b.items()}
+
+show_def(same_lines, layer="lab")
+
+#%% code
+with_newline, without_newline = {"a.py": "x = 1\n"}, {"a.py": "x = 1"}
+print(f"[same_lines] only the final newline differs: {same_lines(with_newline, without_newline)}")
+print(f"[same_lines] a line differs:                 {same_lines(with_newline, {'a.py': 'x = 2'})}")
+
+#%% md
+**`run_on_folder(path, ticket)`** is the whole workflow in one call. It fingerprints your folder, copies it into a workspace named after the folder and the ticket, starts a fresh host with the shipped system, works the ticket, and turns the result into a patch. The report then gathers what a reviewer needs (how the run stopped, what was skipped and changed, the code added, the step claimed, the `left out:` lines, the shortcut markers, the critic's findings and the gates' refusals) and the two guarantees that can be checked afterwards: the folder's fingerprint is unchanged, and the patch applied to the workspace as it started rebuilds the agent's result. The patch is also saved under `.runtime/folder_runs/`.
+
+#%% code
+def run_on_folder(path, ticket, plugins=None, replica=0):
+    """Work a ticket on a copy of a folder, never the folder itself; return the patch, the report and the episode."""
+    src = Path(path).resolve()
+    fingerprint = folder_fingerprint(src)                    # taken first, to prove at the end that nothing changed
+    # one workspace per folder and ticket: the same ticket always lands in the same place
+    name = f"{src.name}-{hashlib.sha256(ticket.encode()).hexdigest()[:8]}"
+    ws = RUNTIME / "folder_runs" / name                      # inside the notebook's own runtime folder
+    skipped = copy_project(src, ws)                          # the agent only ever sees this copy
+    seed = snapshot(ws)                                      # the copy as it started
+    host = Host(plugins=(plugins or shipped_system)(), label="folder")
+    host.replica = replica                                   # part of every request's key in the ledger
+    host.start_session(ws)                                   # a new conversation, rooted in the copy
+    host.handle_prompt(ticket)                               # the ticket joins the conversation
+    res = host.loop(host.ctx, ws, host.model, tag=f"folder:{src.name}")   # the agent works until it stops
+    host.last_turns = res.turns                              # for the statusline in the report
+    final = snapshot(ws)                                     # the copy as the agent left it
+    patch = make_patch(seed, final)                          # everything the agent changed, as one patch
+    changed = sorted(p for p in set(seed) | set(final) if seed.get(p) != final.get(p))   # created, changed or deleted
+    report = {"ticket": ticket, "stop": res.stop, "turns": len(res.turns), "skipped": skipped, "changed": changed,
+              "added_code": measure_change(seed, final)["added_code"],                  # the meter's count
+              "step": claimed_step(res.done_text),                                      # the ladder step the answer names
+              "left_out": [ln.strip() for ln in res.done_text.splitlines() if LEFT_OUT.match(ln)],
+              "shortcuts": find_markers({p: final[p] for p in changed if p.endswith(".py") and p in final}),
+              "critic": host.state.get("critic", {}).get("findings", []),               # what the critic asked for
+              "refused": [t.denied for t in res.turns if t.denied],                     # what the gates turned away
+              "answer": plain(res.done_text), "status": host.status(),
+              "untouched": folder_fingerprint(src) == fingerprint,                      # the folder is as it was
+              "patch_reproduces": same_lines(apply_patch(seed, patch), final)}          # the patch is the result
+    (RUNTIME / "folder_runs" / f"{name}.patch").write_text(patch, encoding="utf-8")   # kept beside the workspace, for git apply
+    return patch, report, res
+
+show_def(run_on_folder, layer="lab")
+
+#%% md
+**First, the guarantees, tested without a model.** A throwaway folder is filled with everything a real project carries and the copy must leave out: a `.git` folder, a virtual environment, `node_modules`, a compiled cache, a binary, a file in a legacy encoding and one too large to be source. Then a program in the workspace tries to write into the original folder through the fence.
+
+#%% code
+results = []                                                 # expect() records each test here
+messy = RUNTIME / "messy_project"
+shutil.rmtree(messy, ignore_errors=True)                     # rebuilt from nothing on every run
+messy_files = {
+    "app.py": b"print('ok')\n",                              # ordinary source: copied
+    "_private.py": b"SECRET_SAUCE = 1\n",                    # a leading underscore is still source: copied
+    ".git/HEAD": b"ref: refs/heads/main\n",                  # version control: skipped
+    ".venv/pyvenv.cfg": b"home = x\n",                       # a virtual environment: skipped
+    "node_modules/pad/index.js": b"module.exports = 1\n",    # dependencies: skipped
+    "pkg/__pycache__/m.cpython-312.pyc": b"\x00\x01",        # compiled cache: skipped
+    "logo.png": b"\x89PNG\r\n\x1a\n\x00\x00",                # binary: skipped
+    "legacy.py": "print('café')\n".encode("latin-1"),        # Latin-1, not UTF-8: skipped
+    "huge.sql": b"-- data\n" * 40_000,                       # 320 kB, over the limit: skipped
+}
+for name_, data in messy_files.items():
+    (messy / name_).parent.mkdir(parents=True, exist_ok=True)
+    (messy / name_).write_bytes(data)
+print(f"[messy] {len(messy_files)} files written under {rel(messy)}/")
+
+#%% md
+**The copy.** Every skip is printed with its reason; the two source files must arrive, and each of the other seven must be left behind with a reason.
+
+#%% code
+before_fp = folder_fingerprint(messy)                        # the original folder, before anything happens to it
+skipped = dict(copy_project(messy, RUNTIME / "messy_copy"))
+for name_, why in sorted(skipped.items()):
+    print(f"  skipped {name_:<34} {why}")
+copied = snapshot(RUNTIME / "messy_copy")
+expect("source files are copied, a _private.py included", {"app.py", "_private.py"} <= set(copied))
+expect("tool folders, binaries, legacy encodings and huge files are left out, each with its reason",
+       {".git/", ".venv/", "node_modules/", "pkg/__pycache__/", "logo.png", "legacy.py", "huge.sql"} <= set(skipped))
+
+#%% md
+**The escape attempt.** A program in a workspace tries to overwrite a file in the original folder by its absolute path. The fence must refuse it, and the folder's fingerprint must not move.
+
+#%% code
+# the escape attempt: open the original app.py by its absolute path and write to it
+attempt = write_files({"escape.py": f"open({str(messy / 'app.py')!r}, 'w').write('changed')\n"}, RUNTIME / "messy_copy_run")
+run = run_fenced(attempt, ["escape.py"], timeout=30)
+expect("a program in the workspace cannot write into the original folder", run.returncode != 0 and bool(run.refused))
+expect("the original folder is byte for byte what it was", folder_fingerprint(messy) == before_fp)
+
+#%% md
+**Then a real run.** The sample project is a lending library's loans module with a bug that its two callers share: a book returned on its due date is counted as a day late. Its visible test passes and the bug is real, the classic shape of a ticket. The tempting fix is in `fine()`, where the symptom shows; the right one is in `days_late()`, where it starts, because the overdue report calls that too. The module also carries some planted over-engineering (a fine "strategy" interface with one implementation, and a factory for it), which the ticket does not mention. After the run, a check the agent never saw decides whether the fix is right everywhere, on a fresh copy with the patch applied.
+
+#%% code
+SAMPLE = ROOT / "fixtures" / "sample_project"               # the lending library, shipped with the notebook
+TICKET = "Readers are being fined when they return a book on its due date. They should only be charged from the day after. Fix it."
+patch, report, res = run_on_folder(SAMPLE, TICKET)          # in a replay every answer comes from the ledger
+print(f"[folder] {SAMPLE.name}: {report['stop']} after {report['turns']} turns; {len(report['changed'])} file(s) changed, "
+      f"{report['added_code']} code lines added")
+
+#%% md
+**The report, then the patch.** The report comes first on purpose: it says what the agent claims to have done and left out before the diff shows what it did.
+
+#%% code
+print(f"  left out of the copy: {report['skipped'] or 'nothing'}")
+print(f"  step claimed: {report['step'] or '-'}")
+for line in report["left_out"]:                              # each deferral, with the condition to build it
+    print(f"  {line}")
+print(f"  shortcuts marked: {len(report['shortcuts'])}; critic findings: {len(report['critic'])}; gate refusals: {len(report['refused'])}")
+print(f"  your folder untouched: {'yes' if report['untouched'] else 'NO'}; the patch reproduces the result: "
+      f"{'yes' if report['patch_reproduces'] else 'NO'}")
+print(f"  statusline: {report['status']}\n")
+print("  the patch:")
+print(textwrap.indent(patch or "(empty)", "    "))
+
+#%% md
+**The verdict that matters.** The patch is applied to a fresh copy of the original project, the check the agent never saw is added beside it, and both the project's own test and that check are run in the fence.
+
+#%% code
+fresh = write_files(apply_patch(snapshot(SAMPLE), patch), RUNTIME / "folder_runs" / "sample-verify")   # original plus patch
+shutil.copy(ROOT / "fixtures" / "sample_project_check.py", fresh / "check.py")    # the hidden check, added only now
+visible = run_fenced(fresh, ["tests_visible.py"])          # the project's own test
+hidden = run_fenced(fresh, ["check.py"])                   # the check that decides whether the fix is right
+print(f"\n  on a fresh copy with the patch applied: visible test {'passed' if visible.returncode == 0 else 'FAILED'}, "
+      f"the hidden check {'passed' if hidden.returncode == 0 else 'FAILED: ' + hidden.stderr.strip().splitlines()[-1][:90]}")
+save_exp("folder", {"stop": report["stop"], "turns": report["turns"], "changed": len(report["changed"]),
+                    "added": report["added_code"], "untouched": report["untouched"], "reproduces": report["patch_reproduces"],
+                    "visible": visible.returncode == 0, "hidden": hidden.returncode == 0,
+                    # fixed where the bug starts: the shared days_late, in the module both callers use
+                    "fixed_at_root": "library/loans.py" in report["changed"] and "days_late" in patch})
+
+#%% md
+The run above is one episode, so it shows the workflow, not a rate. What to look for is whether the fix landed where the bug starts (`days_late`, which both callers use) or where it shows (`fine`), whether the planted strategy classes were left alone (the ticket did not ask about them; at most they earn a `left out:` line), and whether the hidden check passed on a fresh copy, which is the only verdict that matters. This run: the hidden check {{pick:folder.hidden|True=passed|False=failed}}, and the fix {{pick:folder.fixed_at_root|True=changed days_late, the shared function|False=did not change days_late}}.
+
+**For teams.** Use it the way you would use a colleague's pull request. Run it on a branch's folder, read the report before the patch, apply with `git apply <name>.patch`, and run your own tests. The report's `left out:` lines are the review conversation: each names something deliberately not built and when it should be.
+
+#%% md
+## S95 - Dogfooding: does our system pass its own ladder?
+
+**Theory.** A system that preaches proportional code should survive its own measurements. Three are applied here. **Size**: every definition in the notebook was registered by `show_def` with its layer, so the host, the plugin and the lab can be weighed separately; the system someone would adopt is the host plus the plugin, and the lab is the evidence. **Shapes**: Part I's detectors, the ones that look for interfaces with one implementation, factories with one product and their relatives, are run over the source of every host and plugin definition. **Dependencies**: every module the notebook imports is classified as standard library or not, and the host and plugin are checked for using anything beyond it.
+
+**In plain terms.** We point our own over-engineering detectors at our own code.
+
+#%% code
+rows = []
+for layer in ("host", "plugin", "lab"):
+    defs = {n: d for n, d in DEFS.items() if d["layer"] == layer}   # every definition show_def registered in this layer
+    rows.append({"layer": layer, "definitions": len(defs), "lines": sum(d["lines"] for d in defs.values()),
+                 "complexity": np.mean([d["complexity"] for d in defs.values()]) if defs else None,
+                 "largest": max(defs, key=lambda n: defs[n]["lines"]) if defs else "-"})     # the biggest single definition
+table(rows, [("layer", "layer", ""), ("definitions", "definitions", "d"), ("lines", "lines", "d"),
+             ("complexity", "mean complexity", ".1f"), ("largest", "largest definition", "")])
+
+#%% md
+**Our own detectors on our own code.** Part I's shape detectors run over the source of every host and plugin definition; each finding is listed with its line, for a reader to judge whether it is a lapse or a false positive.
+
+#%% code
+system_defs = [n for n, d in DEFS.items() if d["layer"] in ("host", "plugin")]   # the system someone would adopt
+SOURCES = {}
+for n in system_defs:
+    try:
+        SOURCES[n] = textwrap.dedent(source_of(DEFS[n]["obj"]))     # a method's source comes indented
+    except (OSError, TypeError):
+        pass                                                        # a definition whose source cannot be found is skipped
+SHAPE_HITS = []
+for n, src in SOURCES.items():
+    for s, line, detail in detect(src):
+        SHAPE_HITS.append((n, SHAPES.get(s, s), line, detail))      # the shape's readable name, where it has one
+print(f"\n  Part I's shape detectors over {len(system_defs)} host and plugin definitions: {len(SHAPE_HITS)} findings")
+for n, shape, line, detail in SHAPE_HITS[:12]:
+    print(f"    {n}: {shape} (line {line}) {textwrap.shorten(str(detail), 70)}")
+
+#%% md
+**Dependencies.** Every module imported anywhere in the notebook, found by parsing every cell this kernel has run.
+
+#%% code
+imported = set()                                                    # top-level module names
+for src in get_ipython().user_ns.get("In", []):                     # the source of every cell run so far, this one included
+    tree = _safe_parse(src) if isinstance(src, str) else None
+    if not tree:
+        continue                                                    # a cell that does not parse as Python has nothing to add
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            imported |= {a.name.split(".")[0] for a in node.names}  # "import a.b" counts as a
+        elif isinstance(node, ast.ImportFrom) and node.module and not node.level:   # a relative import is not a module
+            imported.add(node.module.split(".")[0])
+print(f"[imports] {len(imported)} top-level modules imported across the notebook")
+
+#%% md
+**Which of them the system itself uses.** A module outside the standard library counts against the system only if the host or plugin source refers to it; the lab's numerical and plotting libraries do not.
+
+#%% code
+# outside the standard library; "module" is the file the S75 probes import answers from, not a dependency
+third = sorted(m for m in imported if m not in sys.stdlib_module_names and m not in ("module",))
+system_src = "\n".join(SOURCES.values())                            # all host and plugin source, as one text
+# how code refers to the usual third-party modules: by their customary short names, or in full
+ALIASES = {"numpy": r"\bnp\.|\bnumpy\.", "matplotlib": r"\bplt\.|\bmatplotlib\.", "ipywidgets": r"\bW\.|\bipywidgets\b"}
+system_third = [m for m in third if re.search(ALIASES.get(m, rf"\b{m}\."), system_src)]   # by its usual alias, or its own name
+print(f"\n  modules outside the standard library imported anywhere in the notebook: {', '.join(third)}")
+print(f"  ... used by the host or the plugin: {', '.join(system_third) or 'none'}")
+lines_of = {r["layer"]: r["lines"] for r in rows}                   # lines per layer, from the size table
+save_exp("dogfood", {r["layer"]: {"definitions": r["definitions"], "lines": r["lines"]} for r in rows}
+         | {"shape_findings": len(SHAPE_HITS), "system_third_party": ", ".join(system_third) or "none",
+            "lab_vs_system": "LARGER" if lines_of["lab"] > lines_of["host"] + lines_of["plugin"] else "SMALLER"})
+
+#%% md
+The host and plugin together are {{exp:dogfood.host.lines}} plus {{exp:dogfood.plugin.lines}} lines over {{exp:dogfood.host.definitions}} and {{exp:dogfood.plugin.definitions}} definitions; the lab, which exists only to produce evidence, is {{pick:dogfood.lab_vs_system|LARGER=larger, which is the right way round|SMALLER=smaller, which for a measurement notebook is a surprise worth a second look}}. The shape detectors found {{exp:dogfood.shape_findings}} instances of the patterns this notebook warns about in the system's own code; each is listed above with its line, so a reader can judge whether it is a lapse or one of the detector's known false positives. Third-party modules used by the system itself: {{exp:dogfood.system_third_party}}. The numerical and plotting libraries belong to the lab.
+
+#%% md
+## S96 - Adopting it: what to switch on, in what order
+
+**Theory.** The arms of the main experiment are also the tiers of adoption, so the evidence for each step is already measured. The table repeats it in one place: what each tier costs in tokens and what it changes in code, passes and safety. The steps below are ordered by cost: a sentence-level change first, machinery later, and each step only if the previous one did not do enough.
+
+**In plain terms.** Start small, measure, and add the next piece only when the last one earned it.
+
+#%% code
+# the adoption tiers, cheapest first: each is an arm of the main experiment
+tiers = {"off": "no rules", "terse": "one terse sentence", "rules": "the ruleset, pasted", "full": "hooks, gates, critic"}
+rows = []
+for arm, what in tiers.items():
+    r = next(x for x in MAIN_ROWS if x["arm"] == arm)               # the arm's row of S64's table
+    rows.append({"tier": what, "arm": arm, "ratio": r["ratio"], "pass": r["pass"], "safe": r["safe"],
+                 "tokens": COST[arm]["tokens in"] + COST[arm]["tokens out"]})     # median in plus median out, from S92
+table(rows, [("tier", "tier", ""), ("arm", "arm", ""), ("ratio", "code vs none", ".2f"), ("pass", "pass, held-out", ".0%"),
+             ("safe", "safe", ".0%"), ("tokens", "median tokens per episode", ".0f")])
+print(f"\n  pieces the ablation ledger removed from the shipped system: {SHIPPED['removed'] or 'none'}")
+
+#%% md
+1. **Write the rule down.** Put the ruleset at level full into your agent's project instructions file. This is the `rules` arm: no machinery, just the words, and the table shows what they did on their own.
+2. **Deliver it properly.** If your agent tool has lifecycle hooks, deliver the rules at session start, again after compaction and to subagents, and print a one-line header on every prompt (Part V). Rules delivered once can drop out of a long session when it is compacted (S40, S73).
+3. **Add the gates that do not depend on the model reading.** Only the pieces the ablation ledger kept (S66); a gate that does not earn its place costs turns for nothing.
+4. **Gate changes to the rules.** Any edit to the ruleset ships only if it moves the measured number and costs nothing (S70). Run that gate in CI on a fixed set of your own tickets.
+5. **Read the debt ledger.** Deferrals without a trigger are the ones that become permanent (S91).
+
+**For teams.** The order matters less than the habit underneath it: every piece is an experiment, and a piece that does not show its effect on your own tickets should be switched off, however reasonable it sounds.
+
+#%% md
+## S97 - Reproducing this notebook
+
+**Theory.** Every model answer this notebook used is in one SQLite ledger, keyed by the exact request. A replay rebuilds every number without a network connection and without a key, and refuses to run if any request is missing from the ledger, which is how we know the notebook shows the answers it was built from. A second collect run with the same key would produce new answers and different numbers; the intervals of Part VII say how different to expect.
+
+**In plain terms.** Everything can be re-run from the stored answers, offline, and come out identical.
+
+#%% code
+# the commands, then the ledger and the fingerprints a reproduction has to match
+print(f"""[reproduce] from the lean_agent folder:
+
+  uv sync --group course                         # the pinned environment
+  python _build/run.py replay                    # every number from the ledger, offline, no key needed
+  python _build/run.py smoke                     # the scripted stand-in, no ledger and no key
+  python _build/run.py collect                   # live calls for anything the ledger lacks (needs the key)
+
+  the ledger: {rel(CACHE_DB)} ({LEDGER.query('SELECT COUNT(*) FROM calls')[0][0]:,} answers)
+  fingerprints: suite {SUITE_HASH[:16]}, ruleset {hashlib.sha256(RULESET_SOURCE.encode()).hexdigest()[:16]}, fence {FENCE_HASH}""")
+
+#%% md
+## S98 - The manifest
+
+**Theory.** The last cell writes down what produced every number: the models behind each role and what the probe found they could do, the days the answers were collected, the fingerprints of the suite, the ruleset, the fence and the pre-registration, the number of answers per model, and the versions of Python and of every library the lab used. A result without its manifest is an anecdote.
+
+**In plain terms.** A receipt for the whole notebook.
+
+#%% md
+**`_version(package)`** is the installed version of a package, or `None` when it is not installed. The manifest records the lab's libraries this way, so a missing optional package (`ipywidgets` in a bare environment, say) is left out instead of stopping the last cell of the notebook.
+
+#%% code
+import importlib.metadata as md
+
+def _version(package):
+    """The installed version of a package, or None if it is not installed."""
+    try:
+        return md.version(package)
+    except md.PackageNotFoundError:
+        return None                                       # not installed: left out of the manifest
+
+show_def(_version, layer="lab")
+
+#%% code
+print(f"[version] numpy {_version('numpy')}; a package that is not installed: {_version('no-such-package-here')}")
+
+#%% md
+**The manifest.** Everything that produced the numbers above, written to `artifacts/manifest.json` and printed.
+
+#%% code
+days = LEDGER.query("SELECT MIN(day), MAX(day) FROM calls")[0]      # the first and last day an answer was collected
+MANIFEST = {
+    "system": SYSTEM_NAME, "mode": LEAN_MODE, "collected": {"from": days[0], "to": days[1]},
+    # each role's model, with what the S12 probe found it could do
+    "models": {role: {"id": m, "can": sorted(CAN.get(m, ()))} for role, m in MODEL_FOR.items()},
+    "answers": {m.split("/")[-1]: n for m, n in LEDGER.query("SELECT model, COUNT(*) FROM calls GROUP BY model")},
+    "fingerprints": {"suite": SUITE_HASH[:16], "ruleset": hashlib.sha256(RULESET_SOURCE.encode()).hexdigest()[:16],
+                     "fence": FENCE_HASH,
+                     "preregistration": hashlib.sha256(json.dumps(PREREG, indent=2, sort_keys=True).encode()).hexdigest()[:16]},
+    "python": sys.version.split()[0],
+    # the lab's libraries; one that is not installed is left out
+    "packages": {p: v for p in ("numpy", "matplotlib", "ipywidgets", "nbclient", "nbformat") if (v := _version(p))},
+    "shipped": SHIPPED, "replicas": REPLICAS, "max_turns": MAX_TURNS, "temperature": TEMPERATURE,
+}
+(ART / "manifest.json").write_text(json.dumps(MANIFEST, indent=2, default=str), encoding="utf-8")
+for k, v in MANIFEST.items():
+    if k not in ("shipped", "models"):                              # those two are long; the models print below
+        print(f"  {k:<13} {v}")
+for role, m in MANIFEST["models"].items():
+    print(f"  {role:<13} {m['id']}  ({', '.join(m['can'])})")
+print(f"\n[manifest] {rel(ART / 'manifest.json')}")
+
+#%% md
+**Part X recap.** The cost is known: where the time goes, what the rules add to every call, and how many tokens buy each line not written. Any recorded episode can be browsed and the host driven by hand. The system runs on a folder of your own without touching it, and returns a patch that is checked to reproduce its result, with a report that puts what it did not build on the table. Our own detectors were turned on our own code, and the adoption guide orders the system's pieces by what they cost and what they were measured to do.
+
+**Try it yourself.**
+1. Run `run_on_folder` on a small project of your own, with a ticket you already know the right answer to. Read the report before the patch. Did it stop at the step you would have?
+2. In S94, use the console to switch to `ultra` and give the same ticket to the sample project. What changes in the patch, and in the `left out:` lines?
+3. Add one module of your own code to the host and run S95 again. Do the detectors find anything, and do you agree with them?
+
+#%% md
+## Done
+
+The notebook started with a claim that sounds like a style preference: the best code is often the code that is never written. It ends with a system that acts on that claim, the measurements that test it, the places where the measurements disagree with it, and the means to try it on your own code. What it cannot settle is in S88, and the next useful experiment is probably yours.

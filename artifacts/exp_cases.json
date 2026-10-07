@@ -1,0 +1,23 @@
+{
+  "cases": [
+    "ob-member-unique",
+    "sf-meter-import",
+    "ob-report-flags"
+  ],
+  "candidates": 32,
+  "direction": "LESS",
+  "gaps": {
+    "ob-member-unique": {
+      "off": 30,
+      "full": 2
+    },
+    "sf-meter-import": {
+      "off": 39,
+      "full": 12
+    },
+    "ob-report-flags": {
+      "off": 42,
+      "full": 16
+    }
+  }
+}

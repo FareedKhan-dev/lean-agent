@@ -1,0 +1,30 @@
+{
+  "full": {
+    "rules": 1.0,
+    "added": 3.3333,
+    "late_added": 2.6667,
+    "passed": 12,
+    "tickets": 12,
+    "compactions": 1.5
+  },
+  "no_re-injection": {
+    "rules": 0.7927,
+    "added": 3.75,
+    "late_added": 3.5,
+    "passed": 12,
+    "tickets": 12,
+    "compactions": 1.5
+  },
+  "off": {
+    "rules": 0.0,
+    "added": 3.6667,
+    "late_added": 3.3333,
+    "passed": 12,
+    "tickets": 12,
+    "compactions": 0.5
+  },
+  "budget": 9000,
+  "rules_gap": 0.2073,
+  "code_gap": 0.4167,
+  "decays": "YES"
+}

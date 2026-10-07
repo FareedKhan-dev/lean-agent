@@ -1,0 +1,2 @@
+{"id": "ledger", "prompt": "Build the ledger specified in SPEC.md, in money/ledger.py.",
+ "extension": "Add a daily limit: `set_daily_limit(account, pence)`. `transfer` gets an optional `day` argument (an ISO date string, default today); transfers out of an account with a limit may not total more than the limit on any one day, and a transfer that would exceed it raises ValueError and changes nothing."}

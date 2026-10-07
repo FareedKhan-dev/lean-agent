@@ -1,0 +1,14 @@
+{
+  "id": "ob-ferry-localtime",
+  "title": "Show ferry departures in port time",
+  "category": "over-build",
+  "split": "held-out",
+  "axis": "quality",
+  "rung": 3,
+  "entry": "timetable.py",
+  "requirements": [],
+  "python_target": "3.12",
+  "prompt": "Show each ferry departure in the local time of its port. Implement `local_departure(utc_time, port)` in timetable.py: it gets a timezone-aware UTC datetime and a port name, and returns the departure as a datetime in that port's local time.",
+  "notes": "zoneinfo knows every daylight-saving rule. The lazy-wrong version uses fixed summer offsets and is wrong half the year; the bloated version hand-codes the DST rules.",
+  "extension": "Add `local_departure_text(utc_time, port)` returning e.g. 'Sun 29 Mar 02:30 BST'."
+}

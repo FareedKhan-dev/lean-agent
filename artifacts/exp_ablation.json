@@ -1,0 +1,79 @@
+{
+  "ladder": {
+    "effect": 1.2143,
+    "lo": 0.2143,
+    "hi": 2.6071,
+    "verdict": "KEPT",
+    "target": "less code"
+  },
+  "read first": {
+    "effect": 0.0,
+    "lo": 0.0,
+    "hi": 0.0,
+    "verdict": "NEUTRAL",
+    "target": "pass"
+  },
+  "never cut": {
+    "effect": 0.15,
+    "lo": 0.0,
+    "hi": 0.35,
+    "verdict": "NEUTRAL",
+    "target": "safe"
+  },
+  "prove it": {
+    "effect": 1.1875,
+    "lo": -3.0,
+    "hi": 5.75,
+    "verdict": "NEUTRAL",
+    "target": "check lines"
+  },
+  "how to answer": {
+    "effect": 5.4545,
+    "lo": -9.5489,
+    "hi": 20.7727,
+    "verdict": "NEUTRAL",
+    "target": "fewer answer words"
+  },
+  "project map": {
+    "effect": 0.0455,
+    "lo": 0.0,
+    "hi": 0.1364,
+    "verdict": "NEUTRAL",
+    "target": "pass"
+  },
+  "read gate": {
+    "effect": 0.0,
+    "lo": 0.0,
+    "hi": 0.0,
+    "verdict": "NEUTRAL",
+    "target": "pass"
+  },
+  "sibling scan": {
+    "effect": 0.0,
+    "lo": 0.0,
+    "hi": 0.0,
+    "verdict": "NEUTRAL",
+    "target": "pass"
+  },
+  "dependency gate": {
+    "effect": 0.0,
+    "lo": 0.0,
+    "hi": 0.0,
+    "verdict": "NEUTRAL",
+    "target": "pass"
+  },
+  "check nudge": {
+    "effect": 4.6875,
+    "lo": 0.9969,
+    "hi": 9.0625,
+    "verdict": "KEPT",
+    "target": "check lines"
+  },
+  "critic": {
+    "effect": 0.95,
+    "lo": 0.0494,
+    "hi": 2.425,
+    "verdict": "KEPT",
+    "target": "less code"
+  }
+}

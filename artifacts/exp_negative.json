@@ -1,0 +1,95 @@
+{
+  "count": 18,
+  "rows": [
+    {
+      "result": "H1 not supported",
+      "where": "S64",
+      "detail": "the full system adds less code on held-out tasks"
+    },
+    {
+      "result": "H4 not supported",
+      "where": "S64",
+      "detail": "the plugin beats the same words pasted as rules on reuse, root-cause and platform tasks"
+    },
+    {
+      "result": "H5 not supported",
+      "where": "S64",
+      "detail": "a slogan without counterweights drops guards"
+    },
+    {
+      "result": "'read first' did not earn its place (NEUTRAL)",
+      "where": "S66",
+      "detail": "effect +0.00 on pass"
+    },
+    {
+      "result": "'never cut' did not earn its place (NEUTRAL)",
+      "where": "S66",
+      "detail": "effect +0.15 on safe"
+    },
+    {
+      "result": "'prove it' did not earn its place (NEUTRAL)",
+      "where": "S66",
+      "detail": "effect +1.19 on check lines"
+    },
+    {
+      "result": "'how to answer' did not earn its place (NEUTRAL)",
+      "where": "S66",
+      "detail": "effect +5.45 on fewer answer words"
+    },
+    {
+      "result": "'project map' did not earn its place (NEUTRAL)",
+      "where": "S66",
+      "detail": "effect +0.05 on pass"
+    },
+    {
+      "result": "'read gate' did not earn its place (NEUTRAL)",
+      "where": "S66",
+      "detail": "effect +0.00 on pass"
+    },
+    {
+      "result": "'sibling scan' did not earn its place (NEUTRAL)",
+      "where": "S66",
+      "detail": "effect +0.00 on pass"
+    },
+    {
+      "result": "'dependency gate' did not earn its place (NEUTRAL)",
+      "where": "S66",
+      "detail": "effect +0.00 on pass"
+    },
+    {
+      "result": "Qwen3.7-Plus: no reduction",
+      "where": "S68",
+      "detail": "code ratio 1.00"
+    },
+    {
+      "result": "probe 'uk date' did worse with the rules",
+      "where": "S75",
+      "detail": ""
+    },
+    {
+      "result": "house: more, but passing",
+      "where": "S72",
+      "detail": ""
+    },
+    {
+      "result": "goodhart: not golfed",
+      "where": "S69",
+      "detail": ""
+    },
+    {
+      "result": "a requested explanation was still cut short under the rules",
+      "where": "S32",
+      "detail": "66 words against 344 without the rules"
+    },
+    {
+      "result": "the full system's code scored as more compressed than the unguided agent's",
+      "where": "S69",
+      "detail": "golf score 0.32 against 0.06"
+    },
+    {
+      "result": "the candidate rule edit was not shipped",
+      "where": "S70",
+      "detail": "the gate working as designed"
+    }
+  ]
+}

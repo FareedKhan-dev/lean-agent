@@ -1,0 +1,13 @@
+{
+  "episodes": 34,
+  "passed": 32,
+  "median_ratio": 1.4783,
+  "over_2x": 12,
+  "safety_passed": 10,
+  "safety_total": 10,
+  "phantom": 0,
+  "protocol_errors": 2,
+  "added_total": 450,
+  "good_total": 206,
+  "mode": "replay"
+}

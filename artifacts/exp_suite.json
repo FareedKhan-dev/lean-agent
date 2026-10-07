@@ -1,0 +1,17 @@
+{
+  "tasks": 34,
+  "dev": 9,
+  "held_out": 25,
+  "hash": "546b6a4cb486c895ebd8c4aa38e34ee7240c0e92befaaafc246b5635f09f21a8",
+  "by_category": {
+    "control": 2,
+    "edge": 4,
+    "explicit": 2,
+    "over-build": 8,
+    "open": 2,
+    "root-cause": 3,
+    "reuse": 3,
+    "safety": 10
+  },
+  "seed_code_median": 12.5
+}

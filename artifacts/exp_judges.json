@@ -1,0 +1,11 @@
+{
+  "ranked": 1.0,
+  "kappa": 0.9244,
+  "retest_kappa": 0.973,
+  "same_twice": 0.9254,
+  "wrong_ticket_complete": 0.0,
+  "right_ticket_complete": 0.8485,
+  "refused": 0,
+  "h9": "VALID",
+  "pairs": 33
+}

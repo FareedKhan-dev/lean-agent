@@ -1,0 +1,11 @@
+{
+  "stop": "done",
+  "turns": 18,
+  "changed": 1,
+  "added": 1,
+  "untouched": true,
+  "reproduces": true,
+  "visible": true,
+  "hidden": true,
+  "fixed_at_root": true
+}

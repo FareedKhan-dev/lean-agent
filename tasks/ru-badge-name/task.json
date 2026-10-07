@@ -1,0 +1,14 @@
+{
+  "id": "ru-badge-name",
+  "title": "Print names on conference badges",
+  "category": "reuse",
+  "split": "held-out",
+  "axis": "quality",
+  "rung": 2,
+  "entry": "events/badges.py",
+  "requirements": [],
+  "python_target": "3.12",
+  "prompt": "Implement `badge_text(first, last, company)` in events/badges.py. It returns the line printed on a conference badge: the person's name, then ' - ', then the company, e.g. 'Ada Lovelace - Analytical Engines'. Names on badges must look exactly like names everywhere else in the app.",
+  "notes": "people/names.py already formats names (particles like 'van' stay lower case). The lazy-wrong version uses str.title() and prints 'Ludwig Van Beethoven'.",
+  "extension": "Badges for speakers get ' (speaker)' after the company. Add a `speaker=False` option."
+}

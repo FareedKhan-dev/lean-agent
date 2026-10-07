@@ -1,0 +1,8 @@
+flowchart TB
+    %%STYLES%%
+    S["📋 <b>a written spec</b><br/>several requirements"]:::grey --> B["🏗️ <b>build it</b><br/>unguided and full system · twice each"]:::lab
+    B --> A{"✅ <b>acceptance tests</b><br/>adversarial ones included"}:::gold
+    A --> X["🎁 <b>a surprise extension</b><br/>new session · same workspace"]:::lab
+    X --> M["📏 <b>code the extension<br/>added or rewrote</b>"]:::host
+    X --> ET{"🧪 does the extension's<br/>own test pass?"}:::gold
+    X --> AG{"🔁 do the original<br/>tests still pass?"}:::gold

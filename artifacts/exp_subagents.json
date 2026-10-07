@@ -1,0 +1,12 @@
+{
+  "with_rules": {
+    "recall": 0.9167,
+    "precision": 0.9061,
+    "decoys": 1
+  },
+  "without": {
+    "recall": 1.0,
+    "precision": 0.9231,
+    "decoys": 2
+  }
+}

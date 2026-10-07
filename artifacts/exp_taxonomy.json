@@ -1,0 +1,119 @@
+{
+  "rows": [
+    {
+      "specimen": "notifier",
+      "shape": "interface, one impl",
+      "bloated": 16,
+      "lean": 2,
+      "ratio": 8.0,
+      "deps": "0 -> 0",
+      "same": "PASSED",
+      "calls": 2
+    },
+    {
+      "specimen": "row parser",
+      "shape": "factory, one product",
+      "bloated": 20,
+      "lean": 2,
+      "ratio": 10.0,
+      "deps": "0 -> 0",
+      "same": "PASSED",
+      "calls": 2
+    },
+    {
+      "specimen": "vat",
+      "shape": "config for a constant",
+      "bloated": 17,
+      "lean": 3,
+      "ratio": 5.6667,
+      "deps": "0 -> 0",
+      "same": "PASSED",
+      "calls": 3
+    },
+    {
+      "specimen": "greeting",
+      "shape": "speculative parameters",
+      "bloated": 15,
+      "lean": 2,
+      "ratio": 7.5,
+      "deps": "0 -> 0",
+      "same": "PASSED",
+      "calls": 2
+    },
+    {
+      "specimen": "top words",
+      "shape": "hand-rolled stdlib",
+      "bloated": 17,
+      "lean": 4,
+      "ratio": 4.25,
+      "deps": "0 -> 0",
+      "same": "PASSED",
+      "calls": 3
+    },
+    {
+      "specimen": "session store",
+      "shape": "delegating wrapper",
+      "bloated": 25,
+      "lean": 10,
+      "ratio": 2.5,
+      "deps": "0 -> 0",
+      "same": "PASSED",
+      "calls": 2
+    },
+    {
+      "specimen": "port parser",
+      "shape": "defensive ceremony",
+      "bloated": 16,
+      "lean": 5,
+      "ratio": 3.2,
+      "deps": "0 -> 0",
+      "same": "PASSED",
+      "calls": 4
+    },
+    {
+      "specimen": "price batch",
+      "shape": "premature concurrency",
+      "bloated": 6,
+      "lean": 2,
+      "ratio": 3.0,
+      "deps": "0 -> 0",
+      "same": "PASSED",
+      "calls": 2
+    },
+    {
+      "specimen": "day parser",
+      "shape": "needless dependency",
+      "bloated": 3,
+      "lean": 3,
+      "ratio": 1.0,
+      "deps": "1 -> 0",
+      "same": "PASSED",
+      "calls": 2
+    },
+    {
+      "specimen": "clamp",
+      "shape": "prose padding",
+      "bloated": 21,
+      "lean": 2,
+      "ratio": 10.5,
+      "deps": "0 -> 0",
+      "same": "PASSED",
+      "calls": 3
+    }
+  ],
+  "total_bloated": 156,
+  "total_lean": 35,
+  "ratio": 4.4571,
+  "by_name": {
+    "notifier": 8.0,
+    "row_parser": 10.0,
+    "vat": 5.6667,
+    "greeting": 7.5,
+    "top_words": 4.25,
+    "session_store": 2.5,
+    "port_parser": 3.2,
+    "price_batch": 3.0,
+    "day_parser": 1.0,
+    "clamp": 10.5
+  }
+}

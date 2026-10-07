@@ -1,0 +1,7 @@
+{
+  "single-shot_whole_reply": 1.3548,
+  "single-shot_prose": 1.0,
+  "single-shot_code_lines": 0.8125,
+  "agentic_final_message": 0.6857,
+  "agentic_code_in_the_diff": 0.8846
+}

@@ -1,0 +1,10 @@
+{
+  "task": "rc-day-parse",
+  "turns": 17,
+  "passed": true,
+  "added": 2,
+  "denied": 1,
+  "gates": [
+    "sibling scan"
+  ]
+}

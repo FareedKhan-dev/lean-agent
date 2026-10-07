@@ -1,0 +1,998 @@
+#%% md
+## Beyond the small tasks
+
+The 34 tasks are small on purpose: one ticket, one trap, a few files. The experiments in this half go where small tasks cannot reach. A real project has conventions that invite over-building. A long session gets compacted. A specification has many requirements, and then a requirement nobody announced. And some behaviours (handling the odd case, tolerating messy input, keeping a yes-or-no answer a yes or a no) only show up across many short probes. Each experiment states its hypothesis from S61 and what would count against it.
+
+All of them need tasks that live outside `tasks/`: a house-style project with six tickets, and three specifications. `fixture_task` stages a fixture the way S4 lays out a task (a seed, a hidden test, a good reference), so the runner, the fence and the scorer work on it unchanged.
+
+**Where this half goes.** Six experiments, each aimed at a place the 34 small tasks cannot reach.
+
+{{diagram:part7b_map}}
+
+#%% md
+**`fixture_task(task_id, prompt, project, hidden, good=None, category="house")`** turns a fixture folder into an ordinary `Task`: it copies the project in as the seed, puts the hidden test beside it and, when there is one, the good reference under `refs/good`, exactly where S4 puts them. Nothing downstream needs to know the task came from elsewhere, which is the point. The staging folder is wiped first, so a fixture edited between runs is never mixed with an old copy. Every task it makes is also registered in `FIXTURE_TASKS`, which is how the scripted stand-in recognises these tickets in a smoke run.
+
+#%% code
+FIXTURE_TASKS = {}                                           # every task made from a fixture, by id
+
+def fixture_task(task_id, prompt, project, hidden, good=None, category="house"):
+    """A Task built from a fixture folder, staged the way S4 lays a task out, so the runner,
+    the fence and the scorer work on it unchanged."""
+    stage = RUNTIME / "fixture_tasks" / task_id
+    shutil.rmtree(stage, ignore_errors=True)                 # a fresh copy every time: no stale files from an edited fixture
+    shutil.copytree(project, stage / "seed")                 # the project as the agent receives it
+    shutil.copy(hidden, stage / "hidden_test.py")            # the test the agent never sees
+    if good:
+        shutil.copytree(good, stage / "refs" / "good")       # the good answer, laid over the seed when it is scored
+    seed = snapshot(stage / "seed")                          # {path: text}, as every task carries its seed
+    # every fixture is held-out and judged on correctness; the first file by name stands in as the entry
+    task = Task(id=task_id, title=task_id, category=category, split="held-out", axis="correct", rung=7,
+                entry=min(seed), prompt=prompt, notes="", extension="", python_target="3.12",
+                folder=stage, seed=seed, refs=("good",) if good else ())
+    FIXTURE_TASKS[task_id] = task                            # so the scripted coder can find the ticket
+    return task
+
+show_def(fixture_task, layer="lab")
+
+#%% md
+**`_ticket(messages)`** is the scripted coder's lookup from S22, redefined here so it knows the fixture tickets as well as the suite. The scripted stand-in works out which ticket it is answering by finding a task's prompt inside the first user message; without this version, a smoke run would meet the house-style and specification tickets as unknown requests. It matters only in smoke runs: with a real model, the model reads the ticket itself.
+
+#%% code
+def _ticket(messages):
+    """The scripted coder's lookup from S22, now aware of the fixture tickets too (smoke runs only)."""
+    first = next((m["content"] for m in messages if m["role"] == "user"), "")     # the first user message, or nothing
+    # the suite's tasks first, then the fixtures: the first one whose ticket appears in that message
+    return next((t for t in [*SUITE.values(), *FIXTURE_TASKS.values()] if t.prompt in first), None)
+
+show_def(_ticket, layer="lab")
+
+#%% code
+# a request that carries a suite ticket as its first user message
+toy_found = _ticket([{"role": "system", "content": "..."}, {"role": "user", "content": SUITE["ob-postcode-cache"].prompt}])
+toy_none = _ticket([{"role": "user", "content": "What is the capital of France?"}])   # no ticket in it at all
+print(f"[_ticket] a suite ticket is recognised as {toy_found.id}; an unrelated request gives {toy_none}")
+
+#%% md
+## S72 - A project whose conventions invite over-building
+
+**Theory.** Small tasks underestimate the most realistic source of over-building: a code base whose own conventions say "every feature gets a schema, a repository, a service and a handler". An agent that respects conventions, as it should, can turn a two-line change into four new files to match the house style, and every one of those files will look reasonable in review. The house-style project is built around that pressure. It is a small shop back end in five layers (models, schemas, repositories, services, handlers) wired together by a container, and its README tells contributors to follow the layering. Each of its six tickets needs a line or two in the right place and no new file: count a customer's orders, export orders as CSV, find a customer by email in any case, refuse a zero quantity, list the five most recent orders, and add VAT to a total. Every arm from S64 works every ticket twice, and the scorer counts new files and added code beside the hidden test. H13 asks whether the full system adds fewer files and less code while the tests still pass.
+
+**In plain terms.** A project that says "always add all the layers", and six tickets that need a line or two each. Who adds the layers?
+
+**For teams.** Conventions are where this pressure comes from, so they are also the cheapest place to relieve it. One sentence in the project's instructions file saying that a small change may stay inside one layer costs nothing, and counting new files per change in review makes layer-copying visible, whoever or whatever wrote the change.
+
+#%% code
+HOUSE = ROOT / "fixtures" / "house"                          # the project, its hidden tests and its good answers
+house_tickets = json.loads((HOUSE / "tickets.json").read_text(encoding="utf-8"))   # each ticket: an id and a prompt
+HOUSE_TASKS = []                                             # one fixture task per ticket
+for t in house_tickets:
+    # the same project for every ticket, with that ticket's own hidden test and good answer
+    HOUSE_TASKS.append(fixture_task(t["id"], t["prompt"], HOUSE / "project", HOUSE / "hidden" / f"{t['id']}.py",
+                                    HOUSE / "good" / t["id"]))
+print(f"[house] tickets staged: {', '.join(t.id for t in HOUSE_TASKS)}")
+
+#%% code
+house_seed = HOUSE_TASKS[0].seed                             # every ticket starts from the same files
+# folders under shopfront/ that hold files: the layers the README asks every feature to copy
+layers = Counter(p.split("/")[1] for p in house_seed if p.startswith("shopfront/") and p.count("/") >= 2)
+# the size of the project the six tickets land in
+print(f"[house] {len(HOUSE_TASKS)} tickets on a project of {sum(p.endswith('.py') for p in house_seed)} Python files, "
+      f"{sum(measure_source(s, p)['code'] for p, s in house_seed.items() if p.endswith('.py'))} lines of code")
+print("  layers: " + ", ".join(f"{k}/ ({v} files)" for k, v in sorted(layers.items())))           # files per layer
+# the sentence that creates the pressure, quoted from the project's own README
+print("  the README: " + re.search(r"When you add a feature[^.]*\.", house_seed["README.md"]).group(0))
+
+#%% md
+Before any model sees the project, each ticket is checked against its references: the untouched seed should fail its hidden test, and the good answer should pass it with a line or two of code and no new file.
+
+#%% code
+HOUSE_GOOD = {}                                              # each ticket's good answer, scored: the floor for FIG 16
+for t in HOUSE_TASKS:
+    g = score(t, materialise(t, WS_DIR / f"house-{t.id}-good", "good"))                 # the good answer over the seed
+    seed_score = score(t, materialise(t, WS_DIR / f"house-{t.id}-seed"), visible=False)  # the seed alone
+    HOUSE_GOOD[t.id] = g
+    # seed verdicts, good verdicts, and what the good answer cost in lines and files
+    print(f"  {t.id:<12} seed {seed_score.short():<3} good {g.short():<3} {g.added_code:>2} code lines, "
+          f"{g.files_new} new files   {textwrap.shorten(t.prompt, 62)}")
+
+#%% code
+HOUSE_RUNS = run_grid(list(ARM_NAMES), HOUSE_TASKS, label="house style")     # every arm of S64, every ticket, twice
+
+#%% code
+GOOD_ADDED = float(np.mean([g.added_code for g in HOUSE_GOOD.values()]))      # the floor: what the tickets needed
+HOUSE_ROWS = []                                              # one row per arm, averaged over tickets and runs
+for arm in ARM_NAMES:
+    rs = [r for r in HOUSE_RUNS if r.arm == arm and r.score]   # this arm's scored runs
+    if arm == "off":
+        med, ci = (1.0, None)                                # the baseline has no ratio to itself
+    else:
+        med, ci = ratio_summary(HOUSE_RUNS, arm, HOUSE_TASKS)[:2]   # paired by ticket against the unguided agent
+    # averages over both runs of all six tickets
+    HOUSE_ROWS.append({"arm": arm, "runs": len(rs), "pass": np.mean([r.score.passed for r in rs]),
+                       "added": np.mean([r.score.added_code for r in rs]), "new_files": np.mean([r.score.files_new for r in rs]),
+                       "touched": np.mean([r.score.files_touched for r in rs]), "ratio": med,
+                       "ci": "-" if ci is None else f"{ci[0]:.2f} to {ci[1]:.2f}"})   # no interval for the baseline
+table(HOUSE_ROWS, [("arm", "arm", ""), ("runs", "runs", "d"), ("pass", "pass", ".0%"), ("added", "code added per ticket", ".1f"),
+                   ("new_files", "new files per ticket", ".2f"), ("touched", "files touched", ".1f"),
+                   ("ratio", "code vs off", ".2f"), ("ci", "95% interval", "")])
+print(f"  the good answers: {GOOD_ADDED:.1f} code lines per ticket, no new files")    # the floor to read the table against
+
+#%% md
+Which new files the agents actually created, across both runs of every ticket, for the unguided agent and the full system:
+
+#%% code
+for arm in ("off", "full"):
+    new = Counter()                                          # path: how many runs created it
+    for r in HOUSE_RUNS:
+        if r.arm == arm and r.episode:                       # a run with a workspace to look at
+            for p in snapshot(r.episode.ws):
+                if p.endswith(".py") and p not in house_seed:
+                    new[p] += 1                              # a Python file the seed did not have
+    # the five most common, which shows whether the new files copy the layers
+    print(f"  new files under {arm}: " + (", ".join(f"{p} (x{n})" for p, n in new.most_common(5)) or "none"))
+
+#%% code
+H_OFF = next(r for r in HOUSE_ROWS if r["arm"] == "off")     # the unguided agent's row
+H_FULL = next(r for r in HOUSE_ROWS if r["arm"] == "full")   # the full system's row
+# FEWER: less code, no more new files, and no more than five points lost on the hidden tests
+fewer = (H_FULL["added"] < H_OFF["added"] and H_FULL["new_files"] <= H_OFF["new_files"]
+         and H_FULL["pass"] >= H_OFF["pass"] - 0.05)
+H13 = "NOT FEWER"                                            # unless one of the two verdicts below applies
+if fewer:
+    H13 = "FEWER"
+elif H_FULL["pass"] >= H_OFF["pass"] + 0.10:
+    H13 = "MORE, BUT PASSING"                                # more code, but at least ten points ahead on the tests
+print(f"\n  H13: {H13}  (full {H_FULL['added']:.1f} lines and {H_FULL['new_files']:.2f} new files per ticket, "
+      f"off {H_OFF['added']:.1f} and {H_OFF['new_files']:.2f}; pass {H_FULL['pass']:.0%} against {H_OFF['pass']:.0%})")
+# the floor, the verdict, and every arm's numbers; FIG 16's reading quotes them
+save_exp("house", {"good_added": GOOD_ADDED, "h13": H13,
+                   **{r["arm"]: {k: r[k] for k in ("pass", "added", "new_files", "touched", "ratio")} for r in HOUSE_ROWS}})
+
+#%% code
+# FIG  the house-style project
+fig, axes = plt.subplots(1, 2, figsize=(10.5, 3.4))
+x = np.arange(len(ARM_NAMES))                                # one bar per arm, in table order
+colours = []
+for a in ARM_NAMES:
+    if a == "full":
+        colours.append(C1)                                   # the full system in blue
+    elif a == "off":
+        colours.append(INK2)                                 # the unguided agent in dark grey
+    else:
+        colours.append(MUTED)                                # the three controls in light grey
+axes[0].bar(x, [r["added"] for r in HOUSE_ROWS], 0.6, color=colours)
+axes[0].axhline(GOOD_ADDED, color=C3, ls="--", lw=1.2, label="the good answers")     # the floor
+for i, r in enumerate(HOUSE_ROWS):
+    axes[0].text(i, r["added"], f"pass {r['pass']:.0%}", ha="center", va="bottom", fontsize=7.5, color=INK2)   # each bar's pass rate
+axes[0].set_xticks(x, ARM_NAMES)
+axes[0].legend(fontsize=7.5, loc="upper right")              # only the dashed line has a label
+panel(axes[0], "code added per ticket")
+axes[1].bar(x, [r["new_files"] for r in HOUSE_ROWS], 0.6, color=colours)      # the floor here is zero
+axes[1].set_xticks(x, ARM_NAMES)
+panel(axes[1], "new files per ticket (the good answers add none)")
+finish(fig, "s72_house", f"On the house-style project the full system adds {H_FULL['added']:.1f} lines per ticket, "
+       f"the unguided agent {H_OFF['added']:.1f}", "six tickets, two runs each; the dashed line is what the tickets needed")
+
+#%% md
+**Reading FIG 16 (s72_house).** The left panel is code added per ticket, averaged over the six tickets and both runs; the green dashed line is what the good answers added ({{exp:house.good_added:.1f}} lines), the floor, and the label on each bar is that arm's pass rate on the hidden tests. The right panel counts new files per ticket, where the floor is zero: none of the six tickets needs a new file, however the README reads. The unguided agent added {{exp:house.off.added:.1f}} lines and {{exp:house.off.new_files:.2f}} new files per ticket and passed {{exp:house.off.pass:.0%}}; the full system added {{exp:house.full.added:.1f}} lines and {{exp:house.full.new_files:.2f}} new files and passed {{exp:house.full.pass:.0%}}. H13 was registered as reported rather than tested, and on these six tickets the verdict is {{pick:house.h13|FEWER=that the full system built less without failing more|MORE, BUT PASSING=that the full system did not build less: it added more lines per ticket than the unguided agent, and passed far more of the tickets, so part of the unguided agent's smaller number is work it did not finish|NOT FEWER=that the full system did not build less, or did so only by failing more}}. Six tickets on one project are a case study, not a sample of projects; what makes the result worth having is that this is the situation teams are actually in, a convention that is right in general and wrong for a two-line change.
+
+#%% md
+## S73 - One long session: does compaction wash the rules out?
+
+**Theory.** Part V showed mechanically that compaction drops injected rules and that the session hook puts them back. This experiment asks whether that matters for the code. The six house-style tickets are sent one after another in a single session, on one workspace, with a context budget low enough to force several compactions. Each session is run three ways: the full system, the full system with re-injection after compaction switched off, and no plugin at all, twice each. For every ticket the table records the code it added and the share of the agent's model calls on which the rules were actually in the system message (H10). At the end, every ticket's hidden test is run on the final workspace, so a later ticket that broke an earlier one is caught.
+
+One detail of the design shapes what to expect. Without the compaction hook the rules are not gone for good: the prompt hook from S38 sees, at the next ticket, that the level it last injected is missing and puts the rules back. So switching the compaction hook off loses the rules from each compaction until the next ticket, not for the rest of the session. That is the realistic case for a layered design, and the diagram shows both paths.
+
+{{diagram:session_drift}}
+
+**In plain terms.** Six tickets in one long conversation, which has to summarise itself along the way. Do the rules survive the summaries, and does it show in the code?
+
+**For teams.** Compaction is invisible to the person using the agent, which is what makes it dangerous to instructions. If your agent tool lets a plugin act when the context is compacted, that is where instructions belong; if it does not, a one-line header on every prompt (S38) is the fallback that still works.
+
+#%% md
+**`run_session(tasks, recipe, label, replica=0)`** sends several tickets, one after another, through one host on one workspace, so the conversation carries over and compaction can land in the middle of a ticket. For each ticket it records the code added, the new files and the turns, and the share of the agent's model calls whose system message carried the rules. That share comes from a small hook on `pre_llm_call`, which looks at the context just before every call; calls made in a subagent's own context are not counted. Once all the tickets are done, each one's hidden test runs on the final workspace, so a later ticket that broke an earlier one shows up.
+
+#%% code
+SESSION_BUDGET = 9_000          # tokens: low on purpose, so a six-ticket session compacts several times
+
+def run_session(tasks, recipe, label, replica=0):
+    """Several tickets, one after another, in one session on one workspace. Per ticket: code
+    added, new files, turns, and the share of the agent's model calls whose system message
+    carried the rules."""
+    host = Host(plugins=recipe(), label=label)               # one host for the whole session
+    ws = materialise(tasks[0], EPISODES_DIR / label / f"session-r{replica}")   # one workspace for every ticket
+    host.replica = replica                                   # part of the key of every stored answer
+    host.start_session(ws)                                   # once: the tickets share this session
+    seen = []                                                # per model call: were the rules in the system message?
+
+    def note_rules(host, ctx, **_):
+        if ctx is host.ctx:                                  # the agent's own context, not a subagent's
+            seen.append("lean" in ctx.sections)              # the plugin's rules live in the "lean" section
+
+    host.bus.on("pre_llm_call", note_rules, name="probe.rules")   # watches every call the tickets make
+    rows = []                                                # one row per ticket, in the order they were sent
+    for position, t in enumerate(tasks, 1):
+        before = snapshot(ws)                                # the workspace as this ticket finds it
+        n0 = len(seen)                                       # calls counted before this ticket began
+        host.handle_prompt(t.prompt)                         # the next ticket joins the same conversation
+        res = host.loop(host.ctx, ws, host.model, tag=f"{label}:{t.id}")
+        change = measure_change(before, snapshot(ws))        # what this ticket alone changed
+        rules = float(np.mean(seen[n0:])) if len(seen) > n0 else 0.0   # share of this ticket's calls with the rules
+        rows.append({"session": label, "replica": replica, "position": position, "ticket": t.id,
+                     "added": change["added_code"], "new_files": change["files_new"], "turns": len(res.turns),
+                     "rules": rules, "stop": res.stop})
+    for row, t in zip(rows, tasks):
+        row["passed"] = score(t, ws, visible=False).passed       # every ticket, judged on the final workspace
+    return rows, host.ctx.compactions
+
+show_def(run_session, layer="lab")
+
+#%% md
+Three arms, two sessions each, all at once. The low budget is set only for as long as the pool runs and is put back afterwards, even if a session fails, so nothing later in the notebook runs with it.
+
+#%% code
+SESSION_ARMS = {"full": lambda: full_system(),
+                "no re-injection": lambda: full_system(reinject=True),   # the keyword names the piece switched off
+                "off": lambda: []}
+jobs = [(name, replica) for name in SESSION_ARMS for replica in range(REPLICAS)]   # (arm, replica) per session
+saved, CONTEXT_BUDGET = CONTEXT_BUDGET, SESSION_BUDGET      # the low budget, for these sessions only
+try:
+    with ThreadPoolExecutor(WORKERS) as pool:
+        # each session's label names its folder and every tag it sends: 'session-no-re-injection', and so on
+        SESSIONS = dict(zip(jobs, pool.map(lambda j: run_session(HOUSE_TASKS, SESSION_ARMS[j[0]],
+                                                                 "session-" + j[0].replace(" ", "-"), j[1]), jobs)))
+finally:
+    CONTEXT_BUDGET = saved                                  # the notebook's own budget again, whatever happened
+print(f"[session] {len(SESSIONS)} sessions of {len(HOUSE_TASKS)} tickets; the budget is back to {CONTEXT_BUDGET:,} tokens")
+
+#%% code
+SESSION_ROWS = []                                            # one row per arm and ticket position, replicas averaged
+for name in SESSION_ARMS:
+    for position, t in enumerate(HOUSE_TASKS, 1):
+        rs = []                                              # this position's row from each of the arm's sessions
+        for (session_arm, session_replica), (ticket_rows, session_compactions) in SESSIONS.items():
+            if session_arm == name:
+                rs.extend(r for r in ticket_rows if r["position"] == position)   # this ticket, in each of the arm's sessions
+        SESSION_ROWS.append({"session": name, "position": position, "ticket": t.id,
+                             "added": np.mean([r["added"] for r in rs]), "new_files": np.mean([r["new_files"] for r in rs]),
+                             "rules": np.mean([r["rules"] for r in rs]), "turns": np.mean([r["turns"] for r in rs]),
+                             "passed": f"{sum(r['passed'] for r in rs)}/{len(rs)}"})     # passing at the end, of the sessions
+# read down a session: the rules column is the mechanism, the code column the consequence
+table(SESSION_ROWS, [("session", "session", ""), ("position", "ticket", "d"), ("ticket", "id", ""),
+                     ("added", "code added", ".1f"), ("new_files", "new files", ".1f"),
+                     ("rules", "calls with the rules", ".0%"), ("turns", "turns", ".1f"), ("passed", "passed at the end", "")])
+
+#%% code
+SESSION_SUMMARY = {}                                         # one summary per arm, over all its sessions and tickets
+for name in SESSION_ARMS:
+    runs_ = [v for (n, _), v in SESSIONS.items() if n == name]    # (ticket rows, compactions) for each session of the arm
+    rows_ = []
+    for ticket_rows, session_compactions in runs_:
+        rows_.extend(ticket_rows)                                  # every ticket of every session of the arm
+    SESSION_SUMMARY[name] = {"rules": float(np.mean([r["rules"] for r in rows_])),       # share of calls with the rules
+                             "added": float(np.mean([r["added"] for r in rows_])),       # code per ticket
+                             "late_added": float(np.mean([r["added"] for r in rows_ if r["position"] > 3])),  # tickets 4 to 6
+                             "passed": sum(r["passed"] for r in rows_), "tickets": len(rows_),
+                             "compactions": float(np.mean([c for _, c in runs_]))}       # per session
+    s = SESSION_SUMMARY[name]                                     # a short name for the print below
+    errors = sum(r["stop"].startswith("error") for r in rows_)    # tickets the API cut short
+    print(f"  [{name}] {s['compactions']:.1f} compactions per session, rules on {s['rules']:.0%} of calls, "
+          f"{s['added']:.1f} lines per ticket ({s['late_added']:.1f} on tickets 4 to 6), {s['passed']}/{s['tickets']} passed"
+          + (f", {errors} tickets cut short by API errors" if errors else ""))
+
+#%% code
+s_full, s_cut = SESSION_SUMMARY["full"], SESSION_SUMMARY["no re-injection"]     # the two arms H10 compares
+# 'no re-injection' is stored as 'no_re-injection', the key FIG 17's reading looks up
+save_exp("session", {**{k.replace(" ", "_"): v for k, v in SESSION_SUMMARY.items()}, "budget": SESSION_BUDGET,
+                     "rules_gap": s_full["rules"] - s_cut["rules"], "code_gap": s_cut["added"] - s_full["added"],   # positive: more code without the hook
+                     # H10 decays only if both moved: fewer calls carried the rules, and more code was written
+                     "decays": "YES" if s_cut["rules"] < s_full["rules"] and s_cut["added"] > s_full["added"] else "NO"})
+
+#%% code
+# FIG  rules and code across one long session
+fig, axes = plt.subplots(1, 2, figsize=(10.5, 3.4))
+pos = np.arange(1, len(HOUSE_TASKS) + 1)                     # ticket positions 1 to 6
+for name, (colour, ls) in {"full": (C1, "-"), "no re-injection": (C2, "--"), "off": (INK2, ":")}.items():
+    rs = [r for r in SESSION_ROWS if r["session"] == name]   # this arm's rows, in ticket order
+    axes[0].plot(pos, [r["rules"] for r in rs], color=colour, ls=ls, marker="o", ms=4, label=name)   # the mechanism
+    axes[1].plot(pos, [r["added"] for r in rs], color=colour, ls=ls, marker="o", ms=4, label=name)   # the consequence
+axes[0].set_ylim(-0.05, 1.05)                                # a share, with a little room at both ends
+for ax in axes:
+    ax.set_xlabel("ticket in the session")
+    ax.set_xticks(pos)                                       # whole ticket numbers only
+axes[0].legend(fontsize=7.5, loc="lower left")               # one legend serves both panels
+panel(axes[0], "share of model calls with the rules in the system message")
+panel(axes[1], "code added by the ticket")
+finish(fig, "s73_session", f"Without the compaction hook the rules were on {s_cut['rules']:.0%} of calls, "
+       f"with it {s_full['rules']:.0%}", f"six tickets in one session, budget {SESSION_BUDGET:,} tokens, "
+       f"{s_full['compactions']:.1f} compactions per session; two sessions per line")
+
+#%% md
+**Reading FIG 17 (s73_session).** The left panel is the mechanism and the right panel is the consequence. On the left, the full system's line should sit at or near the top throughout, because every compaction is followed by re-injection; the no-re-injection line dips wherever a compaction landed in the middle of a ticket, and recovers at the next ticket when the prompt hook notices the rules are missing. Over the whole session the rules were present on {{exp:session.full.rules:.0%}} of the full system's calls and {{exp:session.no_re-injection.rules:.0%}} without the compaction hook. On the right, code added per ticket: the difference between the two lines is {{exp:session.code_gap:+.1f}} lines per ticket (positive means more code without the hook). H10 expected the rules to decay without re-injection, and the measured answer is {{pick:session.decays|YES=yes: fewer calls carried the rules and more code was written|NO=not clearly: the prompt hook's second line of defence, or the noise of two sessions per arm, leaves no consistent difference in the code}}. The unguided line on the right is the reference for what a long session produces with no rules at all.
+
+#%% md
+## S74 - Specifications, and the extension nobody announced
+
+**Theory.** Proportional code is supposed to be cheaper to *change*, not only smaller on the day it is written; that is the claim that justifies the approach to a team. Three specifications are each built from a written spec with several requirements: an event dispatcher, a thread-safe ledger and a sign-in module with lockout. Each has acceptance tests the agent never sees, adversarial ones included (eight threads moving money at once, five failed sign-ins in a row, a handler that unsubscribes itself while an event is being delivered). The unguided agent and the full system build each spec twice. Then every build receives a follow-up ticket it was not told about, in a new session on the workspace it left behind: once-only subscriptions, a daily transfer limit, logout. The table records whether each build passed, how much code the extension had to add or rewrite, whether the extension's own test passed, and whether the original acceptance tests still pass afterwards (H12).
+
+**In plain terms.** Build something from a spec, then add a surprise requirement. Is the leaner version easier to extend, and does anything break on the way?
+
+**For teams.** This is the test to copy into your own evaluation of any coding agent. A team pays for the second change to a piece of code far more often than for the first, so measure the cost of the follow-up ticket, and run the original acceptance tests after it.
+
+**Build, then extend.** The extension arrives in a new session on the workspace the build left behind, with no hint of it in the original spec. What it costs to add, and whether the original acceptance tests survive it, is the practical meaning of maintainable.
+
+{{diagram:specs}}
+
+#%% md
+Each specification becomes two fixture tasks on the same starting project: the build, judged by the acceptance tests, and the surprise extension, judged by its own test. Both good references are scored first; if either failed, the comparison would have no floor.
+
+#%% code
+SPECS = ROOT / "fixtures" / "specs"
+SPEC_META = {name: json.loads((SPECS / name / "spec.json").read_text(encoding="utf-8"))   # the prompt and the surprise
+             for name in ("events", "ledger", "auth")}
+SPEC_BUILD, SPEC_EXT, SPEC_REFS = {}, {}, []                 # build tasks, extension tasks, and one reference row per spec
+for name, meta in SPEC_META.items():
+    folder = SPECS / name
+    # the build: the written spec, judged by acceptance tests the agent never sees
+    SPEC_BUILD[name] = fixture_task(f"spec-{name}", meta["prompt"], folder / "project", folder / "hidden_spec.py",
+                                    folder / "good", "spec")
+    # the surprise: the follow-up ticket, with its own hidden test and its own good answer
+    SPEC_EXT[name] = fixture_task(f"spec-{name}-ext", meta["extension"], folder / "project", folder / "hidden_extension.py",
+                                  folder / "good_extension", "spec")
+    good = materialise(SPEC_BUILD[name], WS_DIR / f"spec-{name}-good", "good")            # the good build
+    good_ext = materialise(SPEC_EXT[name], WS_DIR / f"spec-{name}-good-ext", "good")      # the good build, extended
+    stub = score(SPEC_BUILD[name], materialise(SPEC_BUILD[name], WS_DIR / f"spec-{name}-seed"), visible=False)  # the seed alone
+    spec_lines = SPEC_BUILD[name].seed["SPEC.md"].splitlines()                          # the written spec
+    good_build = score(SPEC_BUILD[name], good).added_code                               # what a good build costs
+    good_extension = measure_change(snapshot(good), snapshot(good_ext))["added_code"]     # what the surprise costs a good build
+    refs_ok = score(SPEC_BUILD[name], good).passed and score(SPEC_EXT[name], good_ext).passed   # both references pass
+    SPEC_REFS.append({"spec": name, "requirements": sum(ln.startswith("- ") for ln in spec_lines),   # one bullet each
+                      "stub": stub.short(), "good build": good_build, "good extension": good_extension,
+                      "references pass": "yes" if refs_ok else "NO"})
+# the stub column should show failing verdicts: the seed alone must not pass the spec
+table(SPEC_REFS, [("spec", "spec", ""), ("requirements", "requirements", "d"), ("stub", "stub", ""),
+                  ("good build", "good build, code lines", "d"), ("good extension", "good extension, code lines", "d"),
+                  ("references pass", "references pass", "")])
+
+#%% code
+# what each build is asked for, and the surprise that follows it
+for name, meta in SPEC_META.items():
+    print(f"\n  [{name}] {meta['prompt']}")                    # the build ticket in full
+    print(f"    the surprise: {textwrap.shorten(meta['extension'], 150)}")   # the extension, shortened
+
+#%% code
+SPEC_RUNS = run_grid(["off", "full"], list(SPEC_BUILD.values()), label="spec builds")   # each spec built twice per arm
+
+#%% md
+**`extend(run)`** gives one finished build the surprise ticket, in a new session on the workspace the build left behind, under the same arm and replica as the build. It measures what the extension added or rewrote, then runs two hidden tests on the result: the extension's own, and the original acceptance tests, because an extension that breaks what was already there is not cheap at any size. Starting a new session matters: the agent meets the code as a colleague would the next week, without the conversation that produced it.
+
+#%% code
+def extend(run):
+    """The surprise ticket, in a new session, on the workspace the build left behind."""
+    name = run.task.removeprefix("spec-")                    # 'spec-events' is the events spec
+    ws = Path(run.episode.ws)                                # the build's own workspace, carried forward
+    before = snapshot(ws)                                    # the build as it was left
+    host = Host(plugins=ARMS[run.arm](), label=run.arm)      # the same arm as the build, with fresh plugins
+    host.replica = run.replica                               # and the same replica, which is part of every stored answer's key
+    host.start_session(ws)                                   # a new session: none of the build's conversation
+    host.handle_prompt(SPEC_META[name]["extension"])         # the surprise ticket
+    res = host.loop(host.ctx, ws, host.model, tag=f"{run.arm}:{run.task}:extension")   # tagged apart from the build
+    change = measure_change(before, snapshot(ws))            # what the extension alone added or rewrote
+    extension_passed = score(SPEC_EXT[name], ws, visible=False).passed     # the surprise's own hidden test
+    spec_still_passes = score(SPEC_BUILD[name], ws, visible=False).passed  # the original acceptance tests, afterwards
+    return {"spec": name, "arm": run.arm, "replica": run.replica, "build passed": run.score.passed,
+            "build code": run.score.added_code, "extension passed": extension_passed,
+            "extension code": change["added_code"], "extension files": change["files_touched"],
+            "spec still passes": spec_still_passes, "turns": len(res.turns),
+            "stop": res.stop}
+
+show_def(extend, layer="lab")
+
+#%% code
+with ThreadPoolExecutor(WORKERS) as pool:
+    SPEC_ROWS = list(pool.map(extend, [r for r in SPEC_RUNS if r.episode and r.score]))   # only builds that ran and were scored
+SPEC_ROWS.sort(key=lambda r: (r["spec"], r["arm"], r["replica"]))   # a stable order for the table
+yes = lambda v: "yes" if v else "no"                         # a verdict in words, for the table
+spec_table_rows = []
+for r in SPEC_ROWS:
+    shown = dict(r)                                          # a copy for display; SPEC_ROWS keeps its booleans
+    for k in ("build passed", "extension passed", "spec still passes"):
+        shown[k] = yes(r[k])                                 # the three pass/fail columns
+    spec_table_rows.append(shown)
+table(spec_table_rows,
+      [("spec", "spec", ""), ("arm", "arm", ""), ("replica", "run", "d"), ("build passed", "build passed", ""),
+       ("build code", "build code", "d"), ("extension code", "extension code", "d"), ("extension files", "files", "d"),
+       ("extension passed", "extension passed", ""), ("spec still passes", "spec still passes", "")])
+# failures are counted, not hidden: a build that never ran has no extension to measure
+print(f"  builds that failed to run: {sum(1 for r in SPEC_RUNS if not (r.episode and r.score))}; extensions cut short "
+      f"by API errors: {sum(r['stop'].startswith('error') for r in SPEC_ROWS)}")
+
+#%% code
+SPEC_SUMMARY = {}                                            # one summary per arm, over every spec and run
+for arm in ("off", "full"):
+    rs = [r for r in SPEC_ROWS if r["arm"] == arm]           # this arm's extended builds
+    SPEC_SUMMARY[arm] = {"build": float(np.mean([r["build code"] for r in rs])),             # lines per build
+                         "extension": float(np.mean([r["extension code"] for r in rs])),     # lines per extension
+                         # runs where the build, the extension and the original acceptance tests all pass at the end
+                         "all_pass": sum(r["build passed"] and r["extension passed"] and r["spec still passes"] for r in rs),
+                         "runs": len(rs)}
+    s = SPEC_SUMMARY[arm]                                    # a short name for the print below
+    print(f"  {arm:<5} builds {s['build']:.0f} lines, extends with {s['extension']:.0f}; "
+          f"everything passing at the end in {s['all_pass']}/{s['runs']}")
+# cheaper only if the extensions were smaller and no fewer runs ended with everything passing
+H12 = "CHEAPER" if (SPEC_SUMMARY["full"]["extension"] < SPEC_SUMMARY["off"]["extension"]
+                    and SPEC_SUMMARY["full"]["all_pass"] >= SPEC_SUMMARY["off"]["all_pass"]) else "NOT CHEAPER"
+print(f"\n  H12: {H12}")
+# both arms, the verdict, and the good references for scale; FIG 18's reading quotes them
+save_exp("specs", {**SPEC_SUMMARY, "h12": H12,
+                   "good": {r["spec"]: {"build": r["good build"], "extension": r["good extension"]} for r in SPEC_REFS}})
+
+#%% code
+# FIG  build, then extend
+fig, axes = plt.subplots(1, 2, figsize=(10.5, 3.4))
+names = list(SPEC_META)                                      # events, ledger, auth
+x = np.arange(len(names))                                    # one group of bars per spec
+# the same drawing twice: the build on the left, the extension on the right
+for ax, key, good_key in ((axes[0], "build code", "good build"), (axes[1], "extension code", "good extension")):
+    for k, (arm, colour) in enumerate((("off", INK2), ("full", C1))):
+        rs = []
+        for n in names:
+            rs.append([r for r in SPEC_ROWS if r["spec"] == n and r["arm"] == arm])   # this arm's runs on one spec
+        heights = [np.mean([r[key] for r in rr]) if rr else 0 for rr in rs]          # mean lines per spec
+        ax.bar(x + (k - 0.5) * 0.38, heights, 0.36, color=colour, label=arm)         # off to the left, full to the right
+        for i, rr in enumerate(rs):
+            ok = sum(r["build passed"] and r["extension passed"] and r["spec still passes"] for r in rr)   # all three passed
+            ax.text(i + (k - 0.5) * 0.38, heights[i], f"{ok}/{len(rr)}",            # runs with everything passing
+                    ha="center", va="bottom", fontsize=7.5, color=INK2)
+    goods = [next(r[good_key] for r in SPEC_REFS if r["spec"] == n) for n in names]  # the good reference per spec
+    ax.scatter(x, goods, marker="_", s=400, color=C3, zorder=3, label="good reference")
+    ax.set_xticks(x, names)
+axes[0].legend(fontsize=7.5)                                 # one legend serves both panels
+panel(axes[0], "code added by the build")
+panel(axes[1], "code added or rewritten by the extension")
+finish(fig, "s74_specs", f"The full system extended its builds with {SPEC_SUMMARY['full']['extension']:.0f} lines on average, "
+       f"the unguided agent with {SPEC_SUMMARY['off']['extension']:.0f}",
+       "labels: runs with every test passing at the end (build, extension and the original acceptance tests)")
+
+#%% md
+**Reading FIG 18 (s74_specs).** Each pair of bars is one specification: grey for the unguided agent, blue for the full system, the green tick for the good reference, and the label on each bar counts the runs in which everything passed at the end, the original acceptance tests included. The left panel is the build, where size alone means little unless the build passed. The right panel is the claim being tested: how much code the surprise extension had to add or rewrite. The full system extended its builds with {{exp:specs.full.extension:.0f}} lines on average against {{exp:specs.off.extension:.0f}} for the unguided agent, with everything passing in {{exp:specs.full.all_pass}} of {{exp:specs.full.runs}} runs against {{exp:specs.off.all_pass}} of {{exp:specs.off.runs}}, and the verdict on H12 is {{pick:specs.h12|CHEAPER=that the leaner builds were cheaper to extend|NOT CHEAPER=that the leaner builds were not measurably cheaper to extend}}. Three specifications and two runs each are a small sample, and an extension's size depends as much on where the build put things as on how much it built, so this result is reported, not tested.
+
+#%% md
+## S75 - Probes: behaviours that tasks are too coarse to catch
+
+**Theory.** Some failures are too small and too frequent to show up in a handful of tasks, so they are measured with **probes**: one request, one reply, no agent loop, and the code run against a few checks in the fence. Thirty-one probes in four families are each answered three times without the rules and three times with them:
+- **Edge cases** (16): the sturdy algorithm against the flimsy one. Leap years in 1900 and 2100, an IPv4 address with a trailing newline, the last partial batch, a bill split three ways that must still add up, the median of an even list, a flatten that must not split strings into characters, and so on. This tests the rule *when a sturdier algorithm costs a line or two more, pay it*.
+- **Everyday input** (10): text typed by people, with spaces, capitals, empty fields and stray symbols. Rules that push for less code are most likely to cost something here, by trimming handling that looks optional and is not.
+- **Interface inflation** (4): a function that a caller uses as `if f(x):` must return something false when the answer is no. A tuple or a dict that "explains why" is always true and silently breaks the caller.
+- **Calibration** (1): a timeout and a sensor offset should be named constants, which is what the calibration rule asks for.
+
+API errors are left out of the counts and reported, because an answer that never arrived says nothing about either arm.
+
+**In plain terms.** Thirty-one quick questions, each asked six times, to catch small habits: handling the odd case, coping with messy input, keeping a yes-or-no answer a yes or a no, and naming the numbers someone will tune.
+
+**For teams.** Probes are the cheapest evaluation in this notebook to rebuild for your own domain: a request, a few checks, a good answer and a naive one. Make sure the naive answer fails before trusting a single result, because a probe that cannot fail is the most common way such a test suite flatters whatever it measures.
+
+#%% md
+**`_probe(name, prompt, checks)`** packs one probe as a record with three fixed keys: a name for the tables, the request exactly as the model receives it, and the checks its answer must pass. The checks are the source of a small script that runs beside the answer in the fence and imports it as `module`. It is a function only so that the thirty-one entries below read as a list of probes rather than a wall of brackets.
+
+#%% code
+def _probe(name, prompt, checks):
+    return {"name": name, "prompt": prompt, "checks": checks}    # the checks import the answer as `module`
+
+show_def(_probe, layer="lab")
+
+#%% md
+The thirty-one probes, exactly as the models receive them, family by family.
+
+#%% code
+# every probe as sent: the request text and its check script must not change, or the stored answers no longer match
+PROBE_SET = {"edge": [
+    _probe("leap year", "Write `is_leap(year)`: True if the year is a leap year in the Gregorian calendar.",
+           "from module import is_leap\nassert [is_leap(y) for y in (1900, 2000, 2024, 2100, 2023)] == [False, True, True, False, False]"),
+    _probe("ipv4", "Write `is_ipv4(text)`: True if text is exactly an IPv4 address in dotted form, such as 192.168.0.1, "
+           "and nothing else. It checks what people type into a firewall form.",
+           "from module import is_ipv4\nassert is_ipv4('10.0.0.1') and is_ipv4('255.255.255.255')\n"
+           "assert not any(map(is_ipv4, ['256.1.1.1', '1.2.3', '1.2.3.4\\n', '01.2.3.4', ' 1.2.3.4', '1.2.3.4.5']))"),
+    _probe("batches", "Write `batches(items, size)` yielding consecutive batches of `size` items from any iterable; "
+           "the last batch may be shorter.",
+           "from module import batches\nassert [list(b) for b in batches(range(7), 3)] == [[0, 1, 2], [3, 4, 5], [6]]\n"
+           "assert [list(b) for b in batches((i for i in range(4)), 2)] == [[0, 1], [2, 3]]"),
+    _probe("split bill", "Write `split_bill(total, people)`: split a bill given as a string such as '100.00' between "
+           "`people` people; return the shares as strings with two decimals.",
+           "from decimal import Decimal\nfrom module import split_bill\n"
+           "for total, n in (('100.00', 3), ('10.00', 6), ('0.05', 2)):\n"
+           "    shares = [Decimal(s) for s in split_bill(total, n)]\n"
+           "    assert len(shares) == n and sum(shares) == Decimal(total) and max(shares) - min(shares) <= Decimal('0.01')"),
+    _probe("median", "Write `median(numbers)` for a non-empty list of numbers.",
+           "from module import median\nassert median([3, 1, 2]) == 2 and median([4, 1, 3, 2]) == 2.5"),
+    _probe("pages", "Write `page_count(total, per_page)`: how many pages are needed to show `total` items, `per_page` to a page.",
+           "from module import page_count\nassert [page_count(n, 10) for n in (0, 1, 10, 11, 20, 25)] == [0, 1, 1, 2, 2, 3]"),
+    _probe("casefold", "Write `unique_ignoring_case(words)`: drop repeats ignoring case, keeping the first spelling and the "
+           "order. Our users write in English and German.",
+           "from module import unique_ignoring_case as u\nassert u(['Straße', 'STRASSE', 'Rust', 'rust']) == ['Straße', 'Rust']"),
+    _probe("safe join", "Write `upload_path(folder, filename)`: the path where an uploaded file with this name is saved "
+           "inside `folder`. The filename comes from the user.",
+           "import os\nfrom module import upload_path\nbase = os.path.abspath('uploads')\n"
+           "def inside(name):\n    try:\n        p = upload_path(base, name)\n    except Exception:\n"
+           "        return True              # refusing the name is safe\n"
+           "    return os.path.commonpath([base, os.path.abspath(p)]) == base\n"
+           "assert os.path.basename(upload_path(base, 'a.txt')) == 'a.txt'\n"
+           "assert all(inside(n) for n in ['../x', '../../etc/passwd', '/etc/passwd', 'a/../../x'])"),
+    _probe("london hour", "Write `london_hour(utc_iso)`: the hour of the day in London for a UTC time given like "
+           "'2026-03-29T01:30:00'.",
+           "from module import london_hour\nassert london_hour('2026-03-29T00:30:00') == 0 and london_hour('2026-03-29T01:30:00') == 2\n"
+           "assert london_hour('2026-07-01T12:00:00') == 13 and london_hour('2026-10-25T01:30:00') == 1"),
+    _probe("round half up", "Write `round_money(x)`: round an amount in pounds to two decimals, halves rounded up, as an "
+           "accountant would.",
+           "from module import round_money\n"
+           "assert float(round_money(2.675)) == 2.68 and float(round_money(1.005)) == 1.01 and float(round_money(0.125)) == 0.13"),
+    _probe("csv row", "Write `csv_line(fields)`: one line of CSV text (no line ending) for a list of strings.",
+           "from module import csv_line\nassert csv_line(['a', 'b,c', 'say \"hi\"']) == 'a,\"b,c\",\"say \"\"hi\"\"\"'"),
+    _probe("add param", "Write `add_param(url, key, value)`: return the URL with one more query parameter.",
+           "from urllib.parse import urlsplit, parse_qs\nfrom module import add_param\n"
+           "u = urlsplit(add_param('https://x.org/p?a=1#top', 'q', 'a b&c'))\n"
+           "assert parse_qs(u.query) == {'a': ['1'], 'q': ['a b&c']} and u.fragment == 'top'"),
+    _probe("day parse", "Write `parse_day(text)`: a datetime.date from text like '2026-03-07' or '2026-3-7'.",
+           "import datetime\nfrom module import parse_day\nassert parse_day('2026-03-07') == parse_day('2026-3-7') == datetime.date(2026, 3, 7)"),
+    _probe("flatten", "Write `flatten(nested)`: a flat list of the items in arbitrarily nested lists.",
+           "from module import flatten\nassert flatten([1, [2, ['ab', [3]]], []]) == [1, 2, 'ab', 3]"),
+    _probe("add months", "Write `add_months(d, n)`: the date n calendar months after the date d; if that day does not "
+           "exist in the target month, the last day of that month.",
+           "import datetime as dt\nfrom module import add_months\nD = dt.date\n"
+           "assert add_months(D(2026, 1, 31), 1) == D(2026, 2, 28) and add_months(D(2100, 1, 31), 1) == D(2100, 2, 28)\n"
+           "assert add_months(D(2026, 11, 30), 3) == D(2027, 2, 28) and add_months(D(2024, 1, 31), 1) == D(2024, 2, 29)"),
+    _probe("word count", "Write `top_word(text)`: the most common word in the text, ignoring case and punctuation.",
+           "from module import top_word\nassert top_word('Kettle, kettle. KETTLE! toaster toaster').lower() == 'kettle'"),
+], "everyday": [
+    _probe("quantity", "Write `parse_quantity(text)`: the whole number a shopper typed into a quantity box.",
+           "from module import parse_quantity as p\nassert p('3') == 3 and p(' 3 ') == 3 and p('3\\n') == 3\n"
+           "for bad in ('', 'three'):\n    try:\n        got = p(bad)\n    except ValueError:\n        continue\n"
+           "    assert got in (None, 0), (bad, got)"),
+    _probe("email", "Write `normalise_email(text)`: the form of an email address, as typed at sign-up, that we store and compare.",
+           "from module import normalise_email as n\nassert n('  Ann@Example.ORG ') in ('ann@example.org', 'Ann@example.org')"),
+    _probe("yes or no", "Write `parse_yes_no(text)`: True or False for an answer typed into a survey's yes/no field.",
+           "from module import parse_yes_no as p\nassert p('yes') is True and p('Yes ') is True and p('no') is False and p(' NO') is False"),
+    _probe("tags", "Write `split_tags(text)`: the list of tags from a field where people type them separated by commas.",
+           "from module import split_tags as s\nassert s('a, b,,c , ') == ['a', 'b', 'c'] and s('') == []"),
+    _probe("price", "Write `price_pence(text)`: the price in whole pence from what a seller typed, such as '12.50'.",
+           "from module import price_pence as p\nassert p('12.50') == 1250 and p('12') == 1200 and p(' 12.5 ') == 1250 and p('£12.50') == 1250"),
+    _probe("full name", "Write `full_name(first, last)`: the name printed on a badge; the last-name field is optional on the form.",
+           "from module import full_name as f\nassert f('Ann', 'Lee') == 'Ann Lee' and f('Ann', '') == 'Ann' and f('Ann', None) == 'Ann'"),
+    _probe("phone", "Write `phone_digits(text)`: the digits of a UK phone number as typed by a customer, for sending a text.",
+           "from module import phone_digits as p\nassert p('07700 900-123') == '07700900123' and p(' 07700900123 ') == '07700900123'"),
+    _probe("uk date", "Write `parse_uk_date(text)`: a datetime.date from a date typed by a UK user, day first, like 7/3/2026.",
+           "import datetime\nfrom module import parse_uk_date as p\n"
+           "assert p('7/3/2026') == p('07/03/2026') == p(' 7/3/2026 ') == datetime.date(2026, 3, 7)"),
+    _probe("first word", "Write `first_word(text)`: the first word of a message a user typed, for a notification preview.",
+           "from module import first_word as f\nassert f('  hello world') == 'hello' and f('') == '' and f('   ') == ''"),
+    _probe("percent", "Write `percent_done(done, total)`: the percentage of a user's tasks that are done, for a progress bar.",
+           "from module import percent_done as p\nassert p(1, 4) == 25 and p(0, 0) == 0"),
+], "interface": [
+    _probe("postcode check", "Write `check_postcode(text)` for the address form, which does `if check_postcode(text): save()`. "
+           "Make it as helpful as you like about why a postcode is wrong.",
+           "from module import check_postcode as c\nassert c('SW1A 1AA') and not c('nonsense') and not c('')"),
+    _probe("permission", "Write `can_edit(user, document)`; the editor calls `if can_edit(user, doc):`. Users are dicts with "
+           "'id' and 'role'; documents are dicts with 'owner_id'. Admins and owners may edit; it would help to know the reason.",
+           "from module import can_edit as c\nassert c({'id': 1, 'role': 'admin'}, {'owner_id': 2}) and c({'id': 2, 'role': 'user'}, {'owner_id': 2})\n"
+           "assert not c({'id': 3, 'role': 'user'}, {'owner_id': 2})"),
+    _probe("weekend", "Write `is_weekend(day)` for the scheduler, which does `if is_weekend(d): skip(d)`; day is a datetime.date.",
+           "import datetime as dt\nfrom module import is_weekend as w\nassert w(dt.date(2026, 3, 7)) and not w(dt.date(2026, 3, 9))"),
+    _probe("shippable", "Write `can_ship(order)`; the warehouse does `if can_ship(order): ship(order)`. An order is a dict "
+           "with 'paid' (bool) and 'items' (list). Say why not, if it cannot ship.",
+           "from module import can_ship as c\n"
+           "assert c({'paid': True, 'items': [1]}) and not c({'paid': False, 'items': [1]}) and not c({'paid': True, 'items': []})"),
+], "calibration": [
+    _probe("sensor", "Write `read_temperature(sensor)`: call `sensor.read(timeout=...)` with a 2.5 second timeout, try once "
+           "more if it raises TimeoutError, and add the sensor's calibration offset of -0.4 degrees to the reading.",
+           "import re\nfrom module import read_temperature\nclass S:\n    def __init__(self):\n        self.calls = []\n"
+           "    def read(self, timeout):\n        self.calls.append(timeout)\n        if len(self.calls) == 1:\n"
+           "            raise TimeoutError\n        return 20.0\n"
+           "s = S()\nassert abs(read_temperature(s) - 19.6) < 1e-9 and s.calls == [2.5, 2.5]\n"
+           "src = open('module.py', encoding='utf-8').read()\n"
+           "assert re.search(r'^[A-Z][A-Z0-9_]*\\s*(:[^=]*)?=\\s*2\\.5', src, re.M)\n"
+           "assert re.search(r'^[A-Z][A-Z0-9_]*\\s*(:[^=]*)?=\\s*-\\s*0?\\.4', src, re.M)"),
+]}
+print("[probes] " + ", ".join(f"{k}: {len(v)}" for k, v in PROBE_SET.items()) +
+      f"; {sum(map(len, PROBE_SET.values())) * 6} answers to collect")
+for family, probes in PROBE_SET.items():
+    print(f"  {family:<12} " + ", ".join(p["name"] for p in probes))
+
+#%% md
+**Every probe must be able to say no.** Before any model answers, each probe is run against two answers written for it: a good one, which must pass, and a naive one, which must fail. A probe that the naive answer passes would measure nothing, and one that the good answer fails would punish getting it right; either stops the notebook here, as S8 refused to spend on a broken task. The naive answers are the versions that turn up in real code, and the last column says what each one gets wrong.
+
+**The self-test, drawn.** A probe that cannot fail measures nothing, and one that fails the good answer punishes getting it right, so either kind stops the notebook here.
+
+{{diagram:probes}}
+
+#%% code
+PROBE_REFS = json.loads((ROOT / "fixtures" / "probe_refs.json").read_text(encoding="utf-8"))   # a good and a naive answer each
+print(f"[probes] reference answers for {len(PROBE_REFS)} probes")
+
+#%% md
+**`run_probe(probe, code, tag)`** runs one answer against its probe's checks. It writes the answer as `module.py` and the checks as `checks.py` into a scratch folder, runs the checks in the fence with a thirty-second limit, and deletes the folder. The answer passes only if the checks exit cleanly and the fence did not have to stop them, so an answer that hangs fails just like one that is wrong. The reference answers here and the models' answers later go through this same function, so both are judged the same way.
+
+#%% code
+def run_probe(probe, code, tag):
+    """Run one answer to a probe against its checks, fenced. True if every check passes."""
+    # the answer and its checks side by side, in a scratch folder named after the run and the probe
+    ws = write_files({"module.py": code, "checks.py": probe["checks"]},
+                     RUNTIME / "probes" / f"{tag}-{re.sub(r'[^a-z0-9]+', '-', probe['name'])}")
+    run = run_fenced(ws, ["checks.py"], timeout=30)          # the checks import the answer as `module`
+    shutil.rmtree(ws, ignore_errors=True)                    # hundreds of answers: nothing is kept
+    return run.returncode == 0 and not run.killed            # a clean exit, and the fence never had to step in
+
+show_def(run_probe, layer="lab")
+
+#%% code
+jobs = []
+for ps in PROBE_SET.values():
+    for p in ps:
+        for kind in ("good", "naive"):
+            jobs.append((p, kind))                           # every probe, against both of its reference answers
+ref_names = [(p["name"], kind) for p, kind in jobs]          # the key for each result, in job order
+with ThreadPoolExecutor(WORKERS) as pool:
+    # each job runs one reference answer; the tag keeps good and naive answers in separate folders
+    ref_results = pool.map(lambda j: run_probe(j[0], PROBE_REFS[j[0]["name"]][j[1]], f"ref-{j[1]}"), jobs)
+    ok = dict(zip(ref_names, ref_results))                  # {(probe, 'good' or 'naive'): passed?}
+print(f"[probes] ran {len(ok)} reference answers")
+
+#%% code
+rows = []
+for family, ps in PROBE_SET.items():
+    for p in ps:
+        rows.append({"family": family, "probe": p["name"],
+                     "good": "passes" if ok[(p["name"], "good")] else "FAILS",         # the good answer must pass
+                     "naive": "fails" if not ok[(p["name"], "naive")] else "PASSES",   # the naive one must fail
+                     "why": PROBE_REFS[p["name"]]["why"]})                          # what the naive answer gets wrong
+table(rows, [("family", "family", ""), ("probe", "probe", ""), ("good", "good answer", ""), ("naive", "naive answer", ""),
+             ("why", "what the naive answer gets wrong", "")])
+
+#%% code
+broken = [r["probe"] for r in rows if r["good"] != "passes" or r["naive"] != "fails"]   # either way round is broken
+print("\n  " + ("every probe passes its good answer and fails its naive one" if not broken
+                else "BROKEN PROBES: " + ", ".join(broken)))
+assert not broken, "a probe that cannot tell a good answer from a naive one would measure nothing"   # before any model is asked
+
+#%% code
+print("\n  one pair in full, the bill split three ways:")
+for kind in ("naive", "good"):                               # the naive one first, so the fix reads as a fix
+    print(f"  --- {kind}")
+    print(textwrap.indent(PROBE_REFS["split bill"][kind].rstrip(), "    "))
+
+#%% md
+Then the models answer. A probe is one request and one reply, with no agent loop around it: a fixed system message, the probe's request, and the longest code block of the reply taken as the answer.
+
+#%% code
+# the whole system message of the 'off' arm; the 'rules' arm adds the ruleset after it
+SHOT_SYSTEM = "You are a Python developer. Reply with the finished code in one Python code block."
+CODE_BLOCK = re.compile(r"```[^\n]*\n(.*?)```", re.S)      # a fenced block with any language tag; group 1 is the code
+toy_reply = "Here it is:\n```python\ndef f():\n    return 1\n```\nOr shorter:\n```\nf = 1\n```\n"   # two blocks, one untagged
+print(f"[shot] code blocks found in a sample reply: {CODE_BLOCK.findall(toy_reply)}")             # the longer one wins later
+
+#%% md
+**`single_shot(probe, arm, replica)`** asks the coder model one probe, once, and judges the answer. The `off` arm sends only the fixed system message and the `rules` arm sends the same message with the full ruleset after it, so the ruleset is the only difference between the two requests. The longest code block in the reply is the answer (the whole reply if it has none), and `run_probe` judges it. A request the API failed on comes back with `passed` set to `None`, which keeps it out of the tables instead of counting it as a wrong answer.
+
+#%% code
+def single_shot(probe, arm, replica):
+    """One request, one reply, the code run against the probe's checks in the fence."""
+    system = SHOT_SYSTEM                                     # the off arm: the fixed message alone
+    if arm == "rules":
+        system = SHOT_SYSTEM + "\n\n" + ruleset("full")      # the same message, then the full ruleset
+    messages = [{"role": "system", "content": system}, {"role": "user", "content": probe["prompt"]}]   # no agent loop
+    # the coder with its usual sampling; the replica makes each of the three answers its own stored request
+    r = FRONT_DOOR.chat(MODEL_FOR["coder"], messages, tag=f"shot:{arm}:{probe['name']}", replica=replica, **CODER_PARAMS)
+    if r.finish == "error":                                  # no answer arrived, so there is nothing to judge
+        return {"probe": probe["name"], "arm": arm, "replica": replica, "passed": None, "lines": None}
+    blocks = CODE_BLOCK.findall(r.text)                      # every fenced block in the reply
+    code = max(blocks, key=len) if blocks else r.text       # the longest block; a reply without one is run as it is
+    # the verdict, the size of the answer, and how much prose came with it
+    return {"probe": probe["name"], "arm": arm, "replica": replica, "passed": run_probe(probe, code, f"{arm}-{replica}"),
+            "lines": measure_source(code)["code"], "reply_chars": len(r.text),
+            "prose_chars": len(CODE_BLOCK.sub("", r.text).strip())}     # what the reply said outside its code
+
+show_def(single_shot, layer="lab")
+
+#%% md
+**`_scripted_shot(model, messages, params)`** is the stand-in that answers these requests in a smoke run, so the notebook can run end to end without a model. It recognises a probe request by its system message, which always starts with `SHOT_SYSTEM`, and returns the same short leap-year function whatever was asked; any other request it leaves to the other stand-ins by returning `None`. Most probes fail on that answer, which is fine: a smoke run tests the plumbing, not the model.
+
+#%% code
+@SCRIPTED.register                                           # the newest responder is asked first
+def _scripted_shot(model, messages, params):
+    if not messages[0]["content"].startswith(SHOT_SYSTEM):   # not a probe: another stand-in may answer it
+        return None
+    # one fixed answer for every probe: a smoke run tests the plumbing, not the answers
+    return "```python\ndef is_leap(year):\n    return year % 4 == 0 and (year % 100 != 0 or year % 400 == 0)\n```"
+
+show_def(_scripted_shot, layer="lab")
+
+#%% code
+toy_probe_request = [{"role": "system", "content": SHOT_SYSTEM}, {"role": "user", "content": "Write `is_leap(year)`."}]
+toy_other_request = [{"role": "system", "content": "You are a coding agent."}, {"role": "user", "content": "hello"}]
+# called directly, as the scripted model would call it: no model and no ledger involved
+print(f"[_scripted_shot] a probe request gets {len(_scripted_shot('toy', toy_probe_request, {}))} characters of code; "
+      f"any other request gets {_scripted_shot('toy', toy_other_request, {})}")
+
+#%% code
+jobs = []
+for family in PROBE_SET.values():
+    for p in family:
+        for arm in ("off", "rules"):
+            for rep in range(3):
+                jobs.append((p, arm, rep))                   # one request: this probe, this arm, this replica
+with ThreadPoolExecutor(WORKERS) as pool:
+    SHOTS = list(pool.map(lambda j: single_shot(*j), jobs))  # one result per job, in job order
+answered = [s for s in SHOTS if s["passed"] is not None]    # API errors say nothing about either arm
+for arm in ("off", "rules"):                                 # a first look; the tables below break it down
+    print(f"[probes] {arm}: {sum(s['arm'] == arm for s in answered)} answers, "
+          f"{sum(s['arm'] == arm and s['passed'] for s in answered)} of them passing their checks")
+
+#%% code
+PROBE_ROWS = []                                              # one row per probe, both arms side by side
+for family, probes in PROBE_SET.items():
+    for p in probes:
+        row = {"family": family, "probe": p["name"]}         # the arms' columns are added below
+        for arm in ("off", "rules"):
+            ss = [s for s in answered if s["probe"] == p["name"] and s["arm"] == arm]   # at most three answers
+            row[arm] = float(np.mean([s["passed"] for s in ss])) if ss else None          # the share that passed
+            row[f"{arm} lines"] = float(np.mean([s["lines"] for s in ss])) if ss else None   # code lines per answer
+        PROBE_ROWS.append(row)
+print(f"[probes] {len(PROBE_ROWS)} probes summarised, one row each")
+
+#%% code
+FAMILY_ROWS = []                                             # one row per family: the result, as opposed to the anecdotes
+for family in PROBE_SET:
+    row = {"family": family}
+    for arm in ("off", "rules"):
+        # every answer under this arm to any probe of the family
+        ss = [s for s in answered if s["arm"] == arm and any(s["probe"] == p["name"] for p in PROBE_SET[family])]
+        row[arm] = np.mean([s["passed"] for s in ss])        # pooled over every answer, not averaged probe by probe
+        row[f"{arm} lines"] = np.mean([s["lines"] for s in ss])
+    FAMILY_ROWS.append(row)
+table(FAMILY_ROWS, [("family", "family", ""), ("off", "passed, off", ".0%"), ("rules", "passed, rules", ".0%"),
+                    ("off lines", "code lines, off", ".1f"), ("rules lines", "code lines, rules", ".1f")])
+
+#%% code
+# probes where the rules changed the pass rate, in either direction; probes missing an arm are left out
+worse = [r for r in PROBE_ROWS if r["off"] is not None and r["rules"] is not None and r["rules"] < r["off"]]
+better = [r for r in PROBE_ROWS if r["off"] is not None and r["rules"] is not None and r["rules"] > r["off"]]
+print(f"\n  answers: {len(answered)} of {len(SHOTS)} ({len(SHOTS) - len(answered)} API errors left out)")   # reported, not hidden
+print("  probes where the rules did better: " + (", ".join(f"{r['probe']} ({r['off']:.0%} to {r['rules']:.0%})" for r in better) or "none"))
+print("  probes where the rules did worse:  " + (", ".join(f"{r['probe']} ({r['off']:.0%} to {r['rules']:.0%})" for r in worse) or "none"))
+# the family rates, which are the result, then the probes that moved, by name and by count
+save_exp("probes", {**{r["family"]: {k: r[k] for k in ("off", "rules", "off lines", "rules lines")} for r in FAMILY_ROWS},
+                    "better": [r["probe"] for r in better], "worse": [r["probe"] for r in worse],
+                    "n_better": len(better), "n_worse": len(worse), "errors": len(SHOTS) - len(answered)})
+
+#%% code
+# FIG  the probes
+fig, axes = plt.subplots(1, 2, figsize=(10.5, 3.6), gridspec_kw={"width_ratios": [1.1, 1]})
+x = np.arange(len(FAMILY_ROWS))                              # one pair of bars per family
+axes[0].bar(x - 0.2, [r["off"] for r in FAMILY_ROWS], 0.38, color=INK2, label="off")      # without the rules, left
+axes[0].bar(x + 0.2, [r["rules"] for r in FAMILY_ROWS], 0.38, color=C1, label="rules")    # with them, right
+axes[0].set_xticks(x, [r["family"] for r in FAMILY_ROWS])
+axes[0].set_ylim(0, 1.08)                                    # a little headroom above 100%
+axes[0].legend(fontsize=7.5, loc="lower left")
+panel(axes[0], "share of answers passing their checks, by family")
+rng = np.random.default_rng(SEED)                            # a seeded jitter: the figure is the same on every run
+marks = {"edge": ("o", C1), "everyday": ("s", C2), "interface": ("^", C7), "calibration": ("D", C4)}   # shape and colour
+for family, (m, colour) in marks.items():
+    rs = [r for r in PROBE_ROWS if r["family"] == family and r["off"] is not None and r["rules"] is not None]   # both arms
+    # a small random nudge on both axes, so probes with equal rates do not hide behind each other
+    axes[1].scatter([r["off"] + rng.uniform(-0.03, 0.03) for r in rs], [r["rules"] + rng.uniform(-0.03, 0.03) for r in rs],
+                    marker=m, color=colour, s=28, label=family, alpha=0.85)
+axes[1].plot([0, 1], [0, 1], color=MUTED, lw=1, ls="--")     # above this line, the rules helped
+axes[1].set_xlabel("passed without the rules")
+axes[1].set_ylabel("passed with the rules")
+axes[1].legend(fontsize=7, loc="lower right")                # the four families by marker
+panel(axes[1], "one point per probe; above the line, the rules helped")
+finish(fig, "s75_probes", f"The rules did better on {len(better)} probes and worse on {len(worse)} of {len(PROBE_ROWS)}",
+       "three answers per probe and arm; points are jittered slightly so equal values stay visible")
+
+#%% md
+**Reading FIG 19 (s75_probes).** The left panel gives each family's pass rate with and without the rules; the right panel takes the probes one at a time, with each probe's pass rate without the rules on the horizontal axis and with them on the vertical, so points above the dashed line are probes the rules helped and points below are probes they hurt. Across all thirty-one, the rules did better on {{exp:probes.n_better}} and worse on {{exp:probes.n_worse}}. The family to read first is everyday input, because it is where a ruleset that asks for less code is most likely to do damage: {{exp:probes.everyday.off:.0%}} of answers passed without the rules and {{exp:probes.everyday.rules:.0%}} with them. Edge cases went from {{exp:probes.edge.off:.0%}} to {{exp:probes.edge.rules:.0%}} and interface inflation from {{exp:probes.interface.off:.0%}} to {{exp:probes.interface.rules:.0%}}. With three answers per probe a single probe's rate can only move in thirds, so individual points are anecdotes; the family rates are the result.
+
+#%% md
+## S76 - Subagents, with and without the rules
+
+**Theory.** S41 showed the mechanism: the plugin hands subagents a compact copy of the rules. Whether that changes what they do is measured here on the job where a subagent's judgement matters most, the audit of the planted-bloat project from S52. The audit runs three times with the compact rules injected into the auditor and three times without (the first audit without rules is the one S52 ran, asked again). Recall, precision and proposed deletions of decoys are compared (H11).
+
+**In plain terms.** The same audit, done by a helper that has the rules and by one that does not.
+
+#%% md
+**`audit_run(with_rules, replica)`** runs one audit of the planted-bloat project from S52 by a subagent, and scores what it reports against the known truth. The only switch is whether the plugin hands the auditor its compact copy of the rules; the skill's instructions, the thirty-turn budget and the coder model are the same either way. Each audit works on its own fresh copy of the project. Recall is the share of the planted pieces it found, precision is the share of its findings that point at real bloat, and a decoy delete is a finding that proposes deleting code that is in fact used.
+
+#%% code
+def audit_run(with_rules, replica):
+    """One audit of the planted-bloat project by a subagent, with or without the compact rules."""
+    host = Host(plugins=[LeanPlugin(subagents=with_rules)], label="audit")     # subagents=False: the auditor gets no rules
+    ws = write_files(snapshot(AUDIT_DIR), RUNTIME / f"audit-{'rules' if with_rules else 'bare'}-{replica}")   # a fresh copy
+    host.start_session(ws)
+    host.replica = replica                                   # set before the audit: part of every stored answer's key
+    request = LEAN_SKILLS.skills["lean-audit"].body.strip() + "\n\nAudit the whole project."   # the skill, then the job
+    res, _ = host.subagent("auditor", request, ws, max_turns=30, model=MODEL_FOR["coder"])
+    found = parse_findings(res.done_text)                    # the numbered findings in the auditor's final answer
+    hits, decoys, unmatched = audit_findings_to_truth(found)
+    if found:
+        precision = (len(found) - len(unmatched) - len(decoys)) / len(found)   # findings that point at real bloat
+    else:
+        precision = 0.0                                      # no findings at all: none of them was right
+    return {"auditor": "with rules" if with_rules else "without", "run": replica, "findings": len(found),
+            "recall": len(hits) / len(AUDIT_TRUTH["bloat"]),          # the share of the planted pieces it found
+            "precision": precision,
+            "decoy deletes": len(decoys), "turns": len(res.turns), "stop": res.stop}
+
+show_def(audit_run, layer="lab")
+
+#%% code
+with ThreadPoolExecutor(WORKERS) as pool:
+    # three audits with the rules, then three without
+    AUDIT_ROWS = list(pool.map(lambda j: audit_run(*j), [(w, r) for w in (True, False) for r in range(3)]))
+# every audit on its own row: with three per condition, the spread matters as much as the mean
+table(AUDIT_ROWS, [("auditor", "auditor", ""), ("run", "run", "d"), ("findings", "findings", "d"), ("recall", "recall", ".0%"),
+                   ("precision", "precision", ".0%"), ("decoy deletes", "decoys proposed for deletion", "d"),
+                   ("turns", "turns", "d"), ("stop", "stop", "")])
+
+#%% code
+SUB_SUMMARY = {}                                             # one summary per condition
+for label in ("with rules", "without"):
+    label_rows = [r for r in AUDIT_ROWS if r["auditor"] == label]     # the three audits of one condition
+    SUB_SUMMARY[label] = {"recall": float(np.mean([r["recall"] for r in label_rows])),
+                          "precision": float(np.mean([r["precision"] for r in label_rows])),
+                          "decoys": sum(r["decoy deletes"] for r in label_rows)}   # a total over the three, not a mean
+for label, s in SUB_SUMMARY.items():
+    print(f"  {label:<10} recall {s['recall']:.0%}, precision {s['precision']:.0%}, decoys proposed for deletion {s['decoys']}")
+save_exp("subagents", {k.replace(" ", "_"): v for k, v in SUB_SUMMARY.items()})   # stored as 'with_rules' and 'without'
+
+#%% md
+The audit is a job where the rules could plausibly cut either way. They tell the auditor to read before judging and never to cut a guard, which should raise precision and keep it away from the decoys, but a helper primed to find less code to write might also look harder for code to delete. With rules, the auditor's mean recall was {{exp:subagents.with_rules.recall:.0%}} and its precision {{exp:subagents.with_rules.precision:.0%}}; without them, {{exp:subagents.without.recall:.0%}} and {{exp:subagents.without.precision:.0%}}. Proposed deletions of decoys were {{exp:subagents.with_rules.decoys}} with rules and {{exp:subagents.without.decoys}} without, over three audits each. Three audits per condition can show a large difference and nothing subtler, which is why H11 was registered as reported, not tested.
+
+#%% md
+## S77 - Does the agent's own check catch bugs?
+
+**Theory.** "Leave one runnable check" is only worth its tokens if the check would notice a mistake. The mutation testing that S8b applied to our hidden tests is applied here to the checks the agents wrote themselves, in the first replica of the main experiment. A check counts as the agent's own if it lives in a test file the agent created or changed, or in a self-check block (`if __name__ == "__main__":` with asserts) that the agent added. Small bugs are planted in the code the agent added, never in its checks; each check is run as a module against each mutant, and the share of mutants it catches is the check's mutation score. Before any of that, the checks are run on the agent's own unmutated code: if any of them fails there, the episode's checks are reported as broken instead of being credited with catching every mutant. A worked example comes first: one correct answer with two different checks, to show what the score can tell apart.
+
+**In plain terms.** We break the agent's code on purpose and see whether the test the agent wrote notices.
+
+#%% md
+**`own_checks(task, final)`** finds the checks an agent left in a finished workspace: a test file it created or changed, or a Python file it gave a self-check block (an `if __name__ == "__main__":` tail, or a `demo`, `check`, `selfcheck` or `smoke` function) that the seed's version did not have. A self-check that was already in the seed belongs to the project, not to the agent, so it does not count. Paths come back sorted, so the same workspace always gives the same list.
+
+#%% code
+def own_checks(task, final):
+    """Files holding a check the agent wrote: a test file it created or changed, or a file it
+    gave a self-check block."""
+    out = []
+    for p, s in sorted(final.items()):
+        if not p.endswith(".py") or s == task.seed.get(p):   # only Python files the agent created or changed
+            continue
+        if is_test_file(p):
+            out.append(p)                                    # a test file the agent wrote or edited
+        elif check_tail_start(s) is not None and check_tail_start(task.seed.get(p, "")) is None:
+            out.append(p)                                    # a self-check block the seed's version did not have
+    return out
+
+show_def(own_checks, layer="lab")
+
+#%% code
+toy_task = SUITE["eg-leap-feb"]
+toy_final = dict(toy_task.seed)                                          # the untouched seed, then three changes
+toy_final["tests/test_dates.py"] = "from leases.dates import add_months\n"        # a new test file
+toy_final["leases/dates.py"] = toy_task.seed.get("leases/dates.py", "") + '\n\nif __name__ == "__main__":\n    pass\n'
+toy_final["leases/notes.py"] = "# a new module, with no check in it\n"
+print(f"[own_checks] the files holding the agent's own checks: {own_checks(toy_task, toy_final)}")
+
+#%% md
+**`own_check_score(task, ws, name, cap=12)`** is mutation testing aimed at the agent's own checks. It first runs the checks on the agent's unmutated code, and if any of them fails there, the episode's whole set is reported as broken rather than credited with catching everything. Then it plants single small bugs (S8b's mutants) only in lines the agent added above any self-check, draws at most `cap` of them with a fixed seed, and counts how many make at least one check fail. The checks for one mutant stop at the first failure, since one failing check is enough to say the bug was noticed.
+
+#%% code
+def own_check_score(task, ws, name, cap=12):
+    """Plant up to `cap` small bugs in the code the agent added and count how many its own
+    checks catch. None when the agent left no check."""
+    final = snapshot(ws)
+    checks = own_checks(task, final)
+    if not checks:                                           # nothing of the agent's own to test
+        return None
+
+    def fails(files, tag):
+        scratch = write_files(files, RUNTIME / "own-checks" / f"{name}-{tag}")    # a throwaway copy of the workspace
+        try:
+            for p in checks:
+                # each check runs as a module, so a test inside a package imports as it would in the project
+                run = run_fenced(scratch, ["-m", p.removesuffix(".py").replace("/", ".")], timeout=30)
+                if run.returncode != 0 or run.killed:        # one failing check is enough: the bug was noticed
+                    return True
+            return False
+        finally:
+            shutil.rmtree(scratch, ignore_errors=True)
+
+    if fails(final, "clean"):                                # failing on the agent's own code: broken, not strict
+        return {"checks": checks, "broken": True, "mutants": 0, "caught": 0}
+    plans = []
+    for p, s in sorted(final.items()):
+        if p.endswith(".py") and s != task.seed.get(p) and not is_test_file(p) and _safe_parse(s):
+            start = check_tail_start(s)
+            # lines the agent added above any self-check block: bugs go in the code, never in the check
+            lines = {i + 1 for i in added_lines(task.seed.get(p, ""), s) if start is None or i < start}
+            plans += [(p, new) for _, _, new in mutants(s, lines)]
+    plans = random.Random(SEED).sample(plans, min(cap, len(plans)))   # a fixed draw, the same on every run
+    caught = sum(fails({**final, p: new}, f"m{n}") for n, (p, new) in enumerate(plans))   # one planted bug at a time
+    return {"checks": checks, "broken": False, "mutants": len(plans), "caught": caught}
+
+show_def(own_check_score, layer="lab")
+
+#%% code
+t = SUITE["eg-leap-feb"]
+answer = (t.folder / "refs" / "good" / "leases" / "dates.py").read_text(encoding="utf-8")   # a correct answer to the ticket
+# two checks for the same answer: one assert on the easy case, or four that include the month ends
+DEMO_CHECKS = {
+    "one assert": '\n\nif __name__ == "__main__":\n    assert add_months(datetime.date(2026, 1, 15), 1) == datetime.date(2026, 2, 15)\n',
+    "four asserts": ('\n\nif __name__ == "__main__":\n    D = datetime.date\n'
+                     '    assert add_months(D(2026, 1, 15), 1) == D(2026, 2, 15)\n'
+                     '    assert add_months(D(2024, 1, 31), 1) == D(2024, 2, 29)\n'
+                     '    assert add_months(D(1900, 1, 31), 1) == D(1900, 2, 28)\n'
+                     '    assert add_months(D(2026, 11, 30), 3) == D(2027, 2, 28)\n'),
+}
+print(f"[own checks] the same correct answer to {t.id}, with two different checks beside it:")
+for label, check in DEMO_CHECKS.items():
+    ws = materialise(t, WS_DIR / f"own-check-demo-{label.replace(' ', '-')}")   # a fresh copy of the seed per check
+    (ws / "leases" / "dates.py").write_text(answer + check, encoding="utf-8")     # the answer, with this check as its tail
+    res = own_check_score(t, ws, f"demo-{label.replace(' ', '-')}", cap=40)       # a larger cap: every mutant, or nearly
+    print(f"  {label:<13} caught {res['caught']:>2} of {res['mutants']} planted bugs")   # same bugs, different checks
+print()
+
+#%% code
+pool_runs = [r for r in MAIN if r.replica == 0 and r.arm in ("off", "full") and r.episode]   # first replica, two arms
+with ThreadPoolExecutor(WORKERS) as pool:
+    # one score per episode, in the order of pool_runs; None where the agent left no check
+    OWN = list(pool.map(lambda r: own_check_score(SUITE[r.task], r.episode.ws, f"{r.arm}-{r.task}"), pool_runs))
+print(f"[own checks] {sum(o is not None for o in OWN)} of {len(pool_runs)} episodes left a check of their own")
+
+#%% code
+CHECK_ROWS = []                                              # one row per episode that left a check
+for r, o in zip(pool_runs, OWN):
+    if o:                                                    # None: the episode left no check of its own
+        CHECK_ROWS.append({"arm": r.arm, "task": r.task, "files": ", ".join(o["checks"]),
+                           "broken": "yes" if o["broken"] else "no", "mutants": o["mutants"], "caught": o["caught"],
+                           # no mutants (a broken check, or nothing to mutate): no share rather than a zero
+                           "share": o["caught"] / o["mutants"] if o["mutants"] else None})
+table(CHECK_ROWS, [("arm", "arm", ""), ("task", "task", ""), ("files", "check in", ""), ("broken", "broken", ""),
+                   ("mutants", "mutants", "d"), ("caught", "caught", "d"), ("share", "share", ".0%")])
+
+#%% code
+OWN_SUMMARY = {}                                             # one summary per arm, then the two verdicts
+for arm in ("off", "full"):
+    rs = [c for c in CHECK_ROWS if c["arm"] == arm]          # this arm's episodes that left a check
+    n_mut, n_caught = sum(c["mutants"] for c in rs), sum(c["caught"] for c in rs)   # pooled over the arm's checks
+    # coverage (how many left a check), then quality (what the working checks caught)
+    OWN_SUMMARY[arm] = {"episodes": sum(r.arm == arm for r in pool_runs), "with_check": len(rs),
+                        "broken": sum(c["broken"] == "yes" for c in rs), "mutants": n_mut, "caught": n_caught,
+                        "score": n_caught / n_mut if n_mut else None}
+    s = OWN_SUMMARY[arm]                                     # a short name for the print below
+    print(f"  {arm:<5} {s['with_check']} of {s['episodes']} episodes left a check, {s['broken']} of them broken; "
+          + (f"the working ones caught {n_caught} of {n_mut} planted bugs ({n_caught / n_mut:.0%})" if n_mut else "no mutants to run"))
+
+#%% code
+hidden_pct = load_exp("mutation", {}).get("killed_pct", 1.0)    # S8b's score for our own hidden tests
+own_pct = OWN_SUMMARY["full"]["score"]                       # the full system's working checks, pooled
+if own_pct is None:
+    OWN_SUMMARY["vs_hidden"] = "NONE"                        # no working check to compare
+elif own_pct < hidden_pct - 0.10:
+    OWN_SUMMARY["vs_hidden"] = "LOWER"                       # more than ten points below the hidden tests
+else:
+    OWN_SUMMARY["vs_hidden"] = "SIMILAR"                     # within ten points
+OWN_SUMMARY["hidden_pct"] = hidden_pct                       # kept so the prose can quote the comparison
+# did the full system leave checks in more episodes than the unguided agent?
+OWN_SUMMARY["coverage"] = "MORE" if OWN_SUMMARY["full"]["with_check"] > OWN_SUMMARY["off"]["with_check"] else "NOT MORE"
+print(f"[own checks] the full system's checks against the hidden tests: {OWN_SUMMARY['vs_hidden']}; "
+      f"coverage: {OWN_SUMMARY['coverage']}")
+save_exp("own_checks", OWN_SUMMARY)                          # the closing paragraph of S77 picks its sentences by these
+
+#%% md
+The rows above are every episode of the first replica that left a check of its own, under each arm. Two numbers matter. The first is coverage: {{exp:own_checks.full.with_check}} of {{exp:own_checks.full.episodes}} full-system episodes left a check, against {{exp:own_checks.off.with_check}} of {{exp:own_checks.off.episodes}} for the unguided agent, {{pick:own_checks.coverage|MORE=which is the nudge from S49 and the *prove it* rule doing what they were built for|NOT MORE=so the nudge from S49 and the *prove it* rule did not, on this suite, produce more checks than the model writes unprompted}}. The second is whether those checks are worth anything, and here the measure is unforgiving: the full system's working checks caught {{exp:own_checks.full.caught}} of the {{exp:own_checks.full.mutants}} bugs planted in the code beside them, against {{exp:own_checks.hidden_pct:.0%}} for our hidden tests in S8b. {{pick:own_checks.vs_hidden|LOWER=That gap is the expected one: a check written in a minute by the agent that wrote the code tests the case the agent was already thinking about. What it buys is a tripwire for the obvious regression, at the cost of a few lines.|SIMILAR=That is closer to our own hidden tests than a one-minute check has any right to be, and worth reading case by case in the table above before believing it.|NONE=There were no working checks to test, which is itself the finding.}}
+
+#%% md
+**Part VII recap.** Every claim has now met an experiment designed before its result was known. The main comparison measured size against the unguided agent with safety and completeness beside it, the controls tested whether a one-line instruction would have done as well, the ablation ledger decided which pieces of the system survive, the levels and the six models tested how general the effect is, and the Goodhart arm showed what optimising the measure itself looks like. The rule-change gate {{pick:rule_gate.shipped|True=let through an edit that earned its place|False=kept out an edit that did not earn its place}}. Beyond the small tasks, the house-style project, the long session, the specifications with their surprise extension, the thirty-one probes, the audits by subagents and the mutation test of the agents' own checks took the system where small tasks cannot. Part VIII asks whether any of these measurements could be wrong.
+
+**Try it yourself.**
+1. In S73, raise `SESSION_BUDGET` to 30,000 and run one session per arm. How many compactions are left, and does the session without the compaction hook still lose its rules?
+2. Add a probe to the everyday family for an input you deal with at work (a product code, a postcode, a currency amount), with checks that a careful colleague would agree with, and run it under both arms.
+3. Pick a full-system check from S77 that caught few of its mutants, read the surviving mutants, and write the one assert that would have caught most of them. How many lines did it take?

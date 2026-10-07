@@ -1,0 +1,13 @@
+flowchart TB
+    %%STYLES%%
+    subgraph R1[" "]
+        direction LR
+        a["🧩 <b>S4 task anatomy</b><br/>seed · references<br/>hidden test"]:::lab --> b["🚧 <b>S5 the fence</b><br/>running code we<br/>did not write"]:::host --> c["⚖️ <b>S6 the scorer</b><br/>one record<br/>per workspace"]:::lab --> d["🎫 <b>S7 the suite</b><br/>34 tasks<br/>8 kinds of trap"]:::lab
+    end
+    subgraph R2[" "]
+        direction LR
+        e["🛑 <b>S8 self-test</b><br/>refuse to spend"]:::warn --> f["🧬 <b>S8b mutation testing</b><br/>how strong is each test?"]:::plum --> g["🔑 <b>S8c keyword gates</b><br/>why scoring must execute"]:::gold
+    end
+    R1 --> R2
+    style R1 fill:none,stroke:none
+    style R2 fill:none,stroke:none

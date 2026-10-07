@@ -1,0 +1,19 @@
+flowchart TB
+    %%STYLES%%
+    nb["📓 <b>notebook</b> · not fenced"]:::grey == "python hidden_test.py<br/>no key in its environment" ==> JOB
+    subgraph JOB["🧯 job object · one memory cap · one kill switch"]
+        direction LR
+        P["🐍 <b>sandboxed Python</b><br/>sitecustomize installs the hook first"]:::host -- "subprocess:<br/>this Python only" --> CH["🐍 <b>child Python</b><br/>fenced the same way"]:::host
+    end
+    JOB --> CALLS
+    subgraph CALLS["📞 each risky call raises an audit event"]
+        direction TB
+        c1["📂 <b>files</b><br/>open · listdir · remove · rename"]:::grey
+        c2["🌐 <b>network</b><br/>socket · urllib · name lookup"]:::grey
+        c3["⚙️ <b>processes</b><br/>Popen · os.system · ctypes"]:::grey
+    end
+    CALLS --> F{"🚧 <b>audit hook</b>"}:::gold
+    F -- "the workspace · loopback<br/>this Python" --> OK["✅ <b>allowed</b>"]:::plugin
+    F -- "anything else" --> NO["⛔ <b>PermissionError</b>"]:::warn
+    style JOB fill:#f7faff,stroke:#2a78d6
+    style CALLS fill:#fafaf8,stroke:#d6d4cf

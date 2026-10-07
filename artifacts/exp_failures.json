@@ -1,0 +1,24 @@
+{
+  "off": {
+    "wrong or incomplete": 1,
+    "quality trap": 2
+  },
+  "terse": {
+    "quality trap": 4,
+    "unsafe": 1,
+    "wrong or incomplete": 1
+  },
+  "slogan": {
+    "wrong or incomplete": 2,
+    "quality trap": 2,
+    "turn limit": 1
+  },
+  "rules": {
+    "wrong or incomplete": 3
+  },
+  "full": {
+    "quality trap": 2
+  },
+  "regressions": [],
+  "regressions_text": "none"
+}

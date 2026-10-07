@@ -1,0 +1,11 @@
+{
+  "lazy_failed": [
+    "an expired link is refused"
+  ],
+  "lazy_shapes": "speculative parameters x1",
+  "good_code": 8,
+  "bloated_code": 42,
+  "ratio": 5.25,
+  "bloated_shapes": 0,
+  "good_guards": 1
+}

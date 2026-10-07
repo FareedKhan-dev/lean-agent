@@ -1,0 +1,22 @@
+{
+  "off": {
+    "ratio": 1.0,
+    "golf": 0.0588,
+    "pass": 0.9412,
+    "safe": 1.0
+  },
+  "full": {
+    "ratio": 0.8974,
+    "golf": 0.3235,
+    "pass": 0.9706,
+    "safe": 1.0
+  },
+  "fewest": {
+    "ratio": 0.9161,
+    "golf": 0.2941,
+    "pass": 0.9412,
+    "safe": 1.0
+  },
+  "h8": "NOT GOLFED",
+  "full_golfs_more": "YES"
+}

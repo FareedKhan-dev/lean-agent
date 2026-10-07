@@ -1,0 +1,2470 @@
+#%% md
+# Part I - Measure before you build
+
+Instruments first: if we cannot measure over-engineering reliably, nothing later in this notebook means anything.
+
+**Where this sits.** Every later claim ("the full system adds less code", "it keeps the guard") is a number produced by an instrument built in this Part. An instrument that can be fooled by a comment, a docstring or a clever one-liner would make every one of those claims worthless, so each instrument here is tested against cases built to fool it before it is trusted with anything else. No model is called in Part I.
+
+**By the end of this Part you can** set up the notebook, describe the ten shapes of over-engineering with a working example of each, count added code in a way comments cannot inflate, detect the ten shapes from the syntax tree, tell a short program from a golfed one, spot the lines that act as guards, and use a table of standard-library replacements that tests its own rows.
+
+{{diagram:part1_map}}
+
+#%% md
+## S0 - Setup, parameters and the house style
+
+**Theory.** A notebook that runs for hours against a paid API needs three properties before it does anything interesting: every tunable value in one place with the reason it has that value, every file it writes inside the project, and every random choice seeded. The three parameter cells below are the only place a number like `REPLICAS` or `MAX_TURNS` is set; later sections read them, and where an experiment changes our mind about a value, the comment next to it says which section did that.
+
+**In plain terms.** One place holds every setting. Change a setting there, re-run, and everything downstream follows.
+
+The notebook runs in one of three modes. **smoke** swaps the model for a scripted stand-in and finishes in minutes with zero API calls; it is how the notebook was built. **collect** calls the real models and stores every reply. **replay** reads only stored replies and refuses to call the API, which is how the committed outputs were produced.
+
+#%% code
+# ---- parameters: every tunable value lives here, with the reason it has this value
+import os                         # the mode and the headless switch arrive as environment variables
+
+SYSTEM_NAME = "{{SYSTEM_NAME}}"   # rename the whole system here (and in _build/build.py)
+CMD = "{{CMD}}"                   # command prefix: /lean, /lean-review, $lean, @lean
+
+# smoke = scripted model, zero calls; collect = live calls, all cached; replay = cache only
+LEAN_MODE = os.environ.get("LEAN_MODE", "")
+
+SEED = 42                # the one seed every random choice in the notebook starts from
+REPLICAS = 2             # runs per (task, arm); S63 measures whether 2 resolves the effects we care about
+MAX_TURNS = 20           # per episode, the same for every arm; raised from 14 after the first live baseline,
+                         # where 8 of 34 episodes were still verifying their work when the limit cut them off
+EPISODE_DEADLINE_S = 600 # wall clock per episode, checked between turns
+WORKERS = 10             # concurrent episodes; per-model limits are enforced by the client (S10)
+
+print(f"[params] system  : {SYSTEM_NAME}  (commands /{CMD}, /{CMD}-review, ...)")
+print(f"[params] budget  : {MAX_TURNS} turns, {EPISODE_DEADLINE_S}s per episode, {REPLICAS} replicas")
+
+#%% md
+**The models.** Six models from one endpoint, each with one job. The coder writes every line of code the experiments measure, and the two judges come from a different generation, so a judge is never grading the habits of its own model. If the probe in S12 finds a primary model missing, the public id listed in `FALLBACKS` takes its place; the coder and the fast model have one.
+
+#%% code
+ENDPOINT = "https://api-inference.modelscope.ai/v1"   # every model below is served from this one endpoint
+MODELS = {
+    "coder":  "Qwen-Ambassador/Qwen3.8-27B",          # writes the code in every main experiment
+    "fast":   "Qwen-Ambassador/Qwen3.8-Flash-Next",   # router and read-only subagents
+    "judge":  "Qwen-Ambassador/Qwen3.7-Max",          # a different generation from the coder it judges
+    "judge2": "Qwen-Ambassador/Qwen3.7-Plus",         # second judge, used to measure agreement
+    "big":    "Qwen-Ambassador/Qwen3.8-Max",          # transfer sweep only; reasons by default
+    "omni":   "Qwen-Ambassador/Qwen3.8-Omni-Flash",   # transfer sweep only
+}
+FALLBACKS = {    # used only if the probe in S12 finds the primary id unavailable
+    "Qwen-Ambassador/Qwen3.8-27B": "Qwen/Qwen3.8-27B",
+    "Qwen-Ambassador/Qwen3.8-Flash-Next": "Qwen/Qwen3.8-Flash-Next",
+}
+
+print(f"[params] coder   : {MODELS['coder']}")
+print(f"[params] roles   : {', '.join(MODELS)}; a fallback for {len(FALLBACKS)} of them")
+
+#%% md
+**Limits on each call.** How long a call may take, how the models sample, a ceiling on calls per day, and an optional price for cost reports. The deadline covers the whole call rather than each streamed chunk, so a model that thinks for minutes is stopped at a known point instead of trickling on.
+
+#%% code
+CALL_DEADLINE_S = {                          # seconds for the whole call, not per chunk
+    "default": 120,                          # every model not listed below
+    "Qwen-Ambassador/Qwen3.8-Max": 300,      # the big model of the transfer sweep gets the long deadline too
+    # the coder gets longer, since single questions made it think for minutes
+    "Qwen-Ambassador/Qwen3.8-27B": 300,
+}
+TEMPERATURE, TOP_P = 0.6, 0.95   # greedy decoding makes reasoning models loop, so agents sample
+DAILY_CALL_CAP = 20_000          # a guard against a runaway loop, not a budget; the next run resumes from the cache
+COST_PER_1K_TOKENS = None        # set a price to print costs; None prints tokens and calls only
+
+print(f"[params] calls   : {CALL_DEADLINE_S['default']}s each, {max(CALL_DEADLINE_S.values())}s for the slow models; "
+      f"temperature {TEMPERATURE}, top_p {TOP_P}; at most {DAILY_CALL_CAP:,} calls a day")
+
+#%% md
+**The standard library, once.** Everything the notebook needs from Python itself is imported here, so later cells can use it without a block of imports at the top of each one. Nothing outside the standard library is needed until the house style below brings in matplotlib and numpy.
+
+#%% code
+import sys          # the interpreter: its version, its folders, and the names of the standard-library modules
+import json         # experiment records are json files
+import time         # wall-clock deadlines and timings
+import re           # patterns: path scrubbing, detectors, guard signatures
+import math         # isnan and isfinite, for values that may be missing
+import random       # seeded below, so every draw repeats from run to run
+import hashlib      # fingerprints of requests and of the experiment's inputs
+import tempfile     # temporary folders, pointed inside the project below
+import textwrap     # dedent, for programs written inside strings
+import shutil       # copying and removing workspaces
+import ast          # every detector reads the syntax tree
+import inspect      # signatures and source text, for show_def
+import linecache    # where Jupyter keeps the text of every cell it has run
+from pathlib import Path   # every path in the notebook is a Path
+
+print(f"[setup] python     : {sys.version.split()[0]}")
+
+#%% md
+**Where the notebook is, and which mode it runs in.** Every path is built from `ROOT`, the folder the notebook was started in, and setup stops at once if that folder has no `tasks/` in it. With no mode given, the notebook replays when a cache of live answers exists and runs the scripted smoke model when it does not.
+
+#%% code
+ROOT = Path.cwd().resolve()                                   # the folder Jupyter was started in
+if not (ROOT / "tasks").is_dir():                             # the task suite marks the right folder
+    raise RuntimeError("[setup] run this notebook from the lean_agent folder (tasks/ not found)")
+
+CACHE_DB = ROOT / "artifacts" / "cache" / "llm.sqlite"     # every live answer the models gave
+if not LEAN_MODE:                                             # no mode in the environment: decide from what exists
+    LEAN_MODE = "replay" if CACHE_DB.exists() else "smoke"    # stored answers can be replayed; none means smoke
+
+print(f"[setup] mode       : {LEAN_MODE}")
+print(f"[setup] project    : {ROOT.name}/")
+
+#%% md
+**Folders.** A smoke run writes under `.runtime/smoke/`, so a quick scripted run can never overwrite a workspace, a cached answer or a record produced by a live one. Matplotlib's cache and Python's temporary files are pointed inside the project as well, so the notebook leaves nothing behind anywhere else.
+
+#%% code
+# ---- folders: everything this notebook writes stays inside the project ------------
+# a smoke run shares nothing with a live one: not a workspace, not a cache, not a result
+# workspaces and scratch files: .runtime/, or .runtime/smoke/ for a smoke run
+RUNTIME = ROOT / ".runtime" if LEAN_MODE != "smoke" else ROOT / ".runtime" / "smoke"
+# records, figures and the cache of live answers: artifacts/, or a folder inside the smoke runtime
+ART = ROOT / "artifacts" if LEAN_MODE != "smoke" else RUNTIME / "artifacts"
+FIG = ART / "figures"                       # where finish() saves every figure
+SKILLS_DIR = ROOT / "skills"                # where Part VI writes the skill files
+for d in (RUNTIME / "tmp", RUNTIME / "matplotlib", FIG, ART / "cache", CACHE_DB.parent, SKILLS_DIR):
+    d.mkdir(parents=True, exist_ok=True)    # created once; running the cell again changes nothing
+
+# matplotlib and tempfile read these once, so they are set before either is used
+os.environ.setdefault("MPLCONFIGDIR", str(RUNTIME / "matplotlib"))
+tempfile.tempdir = str(RUNTIME / "tmp")
+
+print(f"[setup] folders    : {RUNTIME.relative_to(ROOT).as_posix()}/ for scratch, "
+      f"{ART.relative_to(ROOT).as_posix()}/ for results")
+
+#%% md
+**What must never be printed.** Two kinds of text: API keys, which S9 adds to `SECRETS` once it has read them, and the absolute paths of this machine, which tell a reader nothing useful about the system. `_PLACES` lists the folders whose paths are replaced by a short label such as `<project>`.
+
+#%% code
+SECRETS = []   # filled in S9; scrub() removes them from anything printed or stored
+_PLACES = [
+    (ROOT, "<project>"),                   # the project itself
+    (ROOT.parent, "<parent>"),             # the folder that holds it
+    (Path(sys.prefix), "<venv>"),          # the virtual environment the kernel runs in
+    (Path(sys.base_prefix), "<python>"),   # the Python installation behind that environment
+    (Path.home(), "<home>"),               # the user's home folder
+]
+print(f"[setup] hidden from every printed path: {', '.join(label for _, label in _PLACES)}")
+
+#%% md
+**`_place_pattern()`** builds one regular expression that finds any of those folders, however the path happens to be written. Python prints a Windows path with backslashes, `as_posix()` writes forward slashes, `repr()` doubles every backslash, and Windows ignores letter case. So each folder contributes three spellings, matched in any case, and the longest spellings are tried first: a path inside the project becomes `<project>`, not `<parent>` followed by the rest.
+
+#%% code
+def _place_pattern():
+    """One regex for every spelling of every place: either slash, the doubled backslashes
+    repr() prints, any letter case (Windows ignores case). Longest first, so a path inside
+    the project becomes <project>, not <parent>."""
+    label = {}                                     # lowercased spelling, then the label that replaces it
+    for path, name in _PLACES:
+        # as Windows writes it, with forward slashes, and with the doubled backslashes of repr()
+        for s in (str(path), path.as_posix(), str(path).replace("\\", "\\\\")):
+            label.setdefault(s.lower(), name)      # the first place to claim a spelling keeps it
+    keys = sorted(label, key=len, reverse=True)    # longest first, so the project wins over its parent
+    return re.compile("|".join(map(re.escape, keys)), re.IGNORECASE), label
+
+_PLACE_RE, _PLACE_LABEL = _place_pattern()         # built once; scrub() uses both
+print(f"[setup] {len(_PLACE_LABEL)} spellings of {len(_PLACES)} places, matched in any letter case")
+
+#%% md
+**`rel(path)`** is how a path reaches the screen: relative to the project, with forward slashes. A path outside the project prints as its bare file name, so nothing about the machine's layout leaks into the output.
+
+#%% code
+def rel(path):
+    """A path as the reader should see it: relative to the project, never absolute."""
+    try:
+        return Path(path).resolve().relative_to(ROOT).as_posix()   # inside the project, such as tasks/eg-ipv4
+    except ValueError:                                              # outside it: the file name alone
+        return Path(path).name
+
+print(f"[setup] artifacts  : {rel(ART)}/   figures: {rel(FIG)}/   cache: {rel(CACHE_DB)}")
+
+#%% md
+**`scrub(text)`** cleans text before it is printed or stored: every known secret becomes `<key>`, and every spelling of the five places becomes its label. Later Parts pass tool output and error messages through it before showing them.
+
+#%% code
+def scrub(text):
+    """Remove secrets and absolute paths (the project, the Python installation, the home
+    folder) from text before it is printed or stored."""
+    text = str(text)                         # paths, exceptions and numbers arrive here too
+    for s in SECRETS:
+        text = text.replace(s, "<key>")      # a key never reaches the screen, wherever it appears
+    # each match is looked up by its lowercase spelling, so a path in capitals gets the same label
+    return _PLACE_RE.sub(lambda m: _PLACE_LABEL[m.group(0).lower()], text)
+
+print(f"[setup] a sample absolute path, scrubbed: {scrub(ROOT / 'tasks')}")
+
+#%% md
+**`_warn_scrubbed(...)`** takes the place of the function Python uses to print a warning. A warning names the file it came from, which inside Jupyter is an absolute path; the replacement passes that name through `scrub()` and leaves the printing itself to Python's own printer, kept in `_showwarning`.
+
+#%% code
+import warnings                          # the module whose printer is replaced below
+_showwarning = warnings.showwarning      # Python's own printer, which still does the writing
+
+def _warn_scrubbed(message, category, filename, lineno, file=None, line=None):
+    """A warning names the file it came from; print that name without this machine's paths."""
+    _showwarning(message, category, scrub(filename), lineno, file, line)   # only the file name is changed
+
+warnings.showwarning = _warn_scrubbed    # every warning from here on goes through scrub()
+print(f"[setup] warnings print scrubbed file names: {warnings.showwarning is _warn_scrubbed}")
+
+#%% md
+**`set_determinism(seed)`** seeds every source of randomness the notebook uses: Python's `random`, numpy's global generator, and `PYTHONHASHSEED`. The hash seed cannot change the kernel that is already running, but the sandbox runs agent code in child processes, and there it fixes the order in which sets of strings are iterated. The cell prints the first draw after seeding, so two runs can be compared at a glance, then seeds again so that the printed draw shifts nothing after it.
+
+#%% code
+# ---- determinism ---------------------------------------------------------------------
+def set_determinism(seed):
+    """Seed every random source we use. PYTHONHASHSEED only affects child processes,
+    which is exactly where it matters here: the sandbox runs agent code in children."""
+    random.seed(seed)                            # the standard library's global generator
+    os.environ["PYTHONHASHSEED"] = str(seed)     # inherited by every child process started from now on
+    try:
+        import numpy as np
+        np.random.seed(seed)                     # numpy's global generator, when numpy is installed
+    except ImportError:
+        pass                                     # no numpy, nothing more to seed
+
+set_determinism(SEED)
+print(f"[setup] determinism seeded @ {SEED}; first draw {random.random():.4f} (same on every run)")
+random.seed(SEED)                                # seed again, so the draw just printed shifts nothing later
+
+#%% md
+**The house style.** One palette and one set of matplotlib defaults for every figure in the notebook: an off-white surface, quiet grey axes with no box around the plot, and a faint grid drawn behind the data. Part I draws the bloated version of a program in red and the lean version in blue.
+
+#%% code
+# ---- the house style for every figure ---------------------------------------------
+import matplotlib
+import matplotlib.pyplot as plt
+import numpy as np
+
+C1, C2, C3, C4 = "#2a78d6", "#eb6834", "#1baf7a", "#eda100"   # blue, orange, green, amber
+C5, C6, C7, C8 = "#e87ba4", "#008300", "#4a3aa7", "#e34948"   # pink, deep green, violet, red
+# text, secondary text, muted text, grid lines and the background surface
+INK, INK2, MUTED, GRID, SURF = "#0b0b0b", "#52514e", "#8a8880", "#e6e5e1", "#fcfcfb"
+matplotlib.rcParams.update({
+    "figure.facecolor": SURF, "axes.facecolor": SURF, "savefig.facecolor": SURF,   # one surface, saved as shown
+    "font.size": 9, "axes.edgecolor": GRID, "axes.labelcolor": INK2, "text.color": INK,
+    # grey tick labels, and only the left and bottom spines
+    "xtick.color": INK2, "ytick.color": INK2, "axes.spines.top": False, "axes.spines.right": False,
+    "axes.grid": True, "grid.color": GRID, "grid.linewidth": 0.6, "axes.axisbelow": True,   # grid behind the data
+    "legend.frameon": False, "figure.dpi": 120,
+})
+print(f"[style] eight series colours and five neutrals; figures are saved to {rel(FIG)}/")
+
+#%% md
+**`finish(fig, name, title, sub=None)`** is the last call of every figure cell. The title states the finding rather than naming the chart, and the grey subtitle carries the number or the caveat. Both are placed at fixed distances in inches from the top edge, not as fractions of the figure, so a long title never runs into the axes whatever the figure's height. It then saves the figure under `figures/`, shows it, closes it, and prints its number, which the **Reading FIG N** notes refer to.
+
+#%% code
+FIG_N = [0]   # figures shown so far; a list, so finish() can count without a global statement
+
+def finish(fig, name, title, sub=None):
+    """Title that states the finding, grey subtitle with the number or the caveat,
+    absolute spacing so a long title never collides with the axes; then save and show."""
+    FIG_N[0] += 1                                    # this figure's number in the notebook
+    h = fig.get_size_inches()[1]                     # the height in inches turns fixed distances into fractions
+    fig.suptitle(title, x=0.02, y=1 - 0.16 / h, ha="left", va="top", fontsize=11, color=INK, weight="bold")
+    if sub:
+        fig.text(0.02, 1 - 0.42 / h, sub, ha="left", va="top", fontsize=8.5, color=INK2)   # just under the title
+    fig.tight_layout(rect=[0, 0, 1, 1 - (0.60 if sub else 0.34) / h])   # the axes end below the text
+    fig.savefig(FIG / f"{name}.png", bbox_inches="tight")
+    plt.show()
+    plt.close(fig)                                   # released, so a long run does not pile up figures
+    print(f"[fig {FIG_N[0]}] {name}.png")
+
+print("[style] palette and finish() ready")
+
+#%% md
+**`panel(ax, text)`** puts a small grey caption at the top left of one panel. The figure's title states the finding; a panel caption says what that one panel shows, which matters when a figure has two or three of them.
+
+#%% code
+def panel(ax, text):
+    """Small grey caption at the top left of one panel."""
+    ax.set_title(text, fontsize=9, color=INK2, loc="left")   # left-aligned, under the figure's own title
+
+print("[style] panel(ax, text): a small grey caption at the top left of one panel")
+
+#%% code
+caption_fig = matplotlib.figure.Figure(figsize=(3, 1))       # outside pyplot, so it is never shown
+caption_ax = caption_fig.add_subplot()
+panel(caption_ax, "every pair returns the same values")
+print(f"[style] panel() captioned the axes: {caption_ax.get_title(loc='left')!r}")
+
+#%% md
+**`widgets()`** returns the ipywidgets module where someone can click, and `None` where nobody can: in a headless run started by `_build/run.py`, or when the package is not installed. Every interactive cell prints its static view first and asks for widgets only after that, so a reader of the saved notebook loses nothing.
+
+#%% code
+HEADLESS = os.environ.get("LEAN_HEADLESS") == "1"   # set by _build/run.py, where nobody can click a widget
+
+def widgets():
+    """ipywidgets where someone can use them; None in a headless run or where the package is
+    missing. Every widget cell prints its static view first, so nothing is lost either way."""
+    # nobody can click here, and building widgets under nbclient has stalled a run before
+    if HEADLESS:
+        return None
+    try:
+        import ipywidgets
+    except ImportError:                              # no package: the static view is all there is
+        return None
+    return ipywidgets
+
+print(f"[style] widgets: {'available' if widgets() else 'static views only'} (headless run: {HEADLESS})")
+
+#%% md
+**`_cell(v, fmt)`** formats one value for `table()`. A missing value prints as `-` rather than `None` or an empty gap, and a format that does not suit the value (a percentage asked of a word) falls back to plain text instead of stopping the whole table.
+
+#%% code
+# ---- printing helpers ------------------------------------------------------------
+def _cell(v, fmt):
+    if v is None or v == "":                 # missing: a dash keeps the column readable
+        return "-"
+    if fmt:                                  # a format such as "d", ".2f" or ".0%"
+        try:
+            return format(v, fmt)
+        except (TypeError, ValueError):      # the format does not suit this value
+            return str(v)
+    return str(v)
+
+print(f"[print] _cell formats one table value: {_cell(0.25, '.0%')}, {_cell(None, 'd')}, {_cell('word', '.2f')}")
+
+#%% code
+for v, fmt in ((None, "d"), (0.4167, ".0%"), (12.3456, ".1f"), ("lean", ".0%"), (7, "")):
+    print(f"  _cell({v!r}, {fmt!r}) gives {_cell(v, fmt)!r}")
+
+#%% md
+**`table(rows, cols, indent=2)`** prints a list of dicts as an aligned table, which is how the notebook shows every result before it draws one. `cols` lists `(key, header, format)` for each column. A column holding only numbers, or gaps, is right-aligned so the digits line up; any other column is left-aligned. Widths are measured on the formatted text, so the table fits exactly what is printed.
+
+#%% code
+def table(rows, cols, indent=2):
+    """Print a list of dicts as an aligned table. cols = [(key, header, format), ...];
+    text columns align left, numbers right."""
+    cells = []                                                    # every value formatted once, row by row
+    for r in rows:
+        cells.append([_cell(r.get(k), f) for k, _, f in cols])   # a missing key formats as a dash
+    numeric = []                                                  # one flag per column: align it right?
+    for k, _, _ in cols:
+        # numbers and gaps only; a single word anywhere in the column makes it a text column
+        numeric.append(all(isinstance(r.get(k), (int, float)) or r.get(k) in (None, "") for r in rows))
+    widths = []                                                   # the header or the widest value, whichever is longer
+    for i, (_, h, _) in enumerate(cols):
+        widths.append(max([len(h)] + [len(c[i]) for c in cells]))
+    pad = " " * indent                                            # the table's left margin
+
+    def line(vals):
+        # numbers to the right, text to the left, two spaces between columns, nothing trailing
+        padded = [v.rjust(w) if num else v.ljust(w) for v, w, num in zip(vals, widths, numeric)]
+        return (pad + "  ".join(padded)).rstrip()
+
+    print(line([h for _, h, _ in cols]))                          # the header row
+    print(pad + "-" * (sum(widths) + 2 * (len(cols) - 1)))        # a rule exactly as wide as the table
+    for c in cells:
+        print(line(c))
+
+print("[print] table(rows, cols): a list of dicts as aligned columns, text left and numbers right")
+
+#%% code
+example = [{"name": "short", "count": 7, "share": 0.25},
+           {"name": "a longer name", "count": None, "share": 1.0}]
+table(example, [("name", "name", ""), ("count", "count", "d"), ("share", "share", ".0%")])
+
+#%% md
+**`bar(frac, width=30, ch="#")`** draws a fraction as a row of characters, for printouts where a figure would be too much. Values are clipped to the range 0 to 1, and a missing value draws nothing, so a bar never breaks a printout.
+
+#%% code
+def bar(frac, width=30, ch="#"):
+    """An ASCII bar for a fraction between 0 and 1."""
+    if frac is None or math.isnan(frac):     # no value: an empty bar, not an error
+        frac = 0.0
+    else:
+        frac = max(0.0, min(1.0, frac))      # clipped, so a ratio above 1 cannot run past its column
+    return ch * round(frac * width)          # rounded to whole characters
+
+print(f"[print] bar(0.4) draws {bar(0.4)!r}; bar(1.7) is clipped to {len(bar(1.7))} characters")
+
+#%% code
+for frac in (0.0, 0.25, 0.5, 1.4, None):
+    print(f"  {frac!s:>5}  |{bar(frac, 20):<20}|")
+
+#%% md
+**`complexity(src)`** is McCabe's cyclomatic complexity, counted from the syntax tree: one for the straight path through the code, plus one for every point where that path can split. Those points are each `if`, loop, `except`, conditional expression, comprehension, `assert` and `match` case, and each extra operand of `and` or `or`. `show_def` records it next to every definition's size, and S95 in Part X uses both to weigh the system.
+
+#%% code
+def complexity(src):
+    """McCabe-style complexity: 1 plus one per decision point (if, loop, except,
+    boolean operator, comprehension, conditional expression, assert)."""
+    tree = ast.parse(textwrap.dedent(src))                     # dedent, so a method's source parses on its own
+    score = 1                                                  # code with no decisions has one path
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.If, ast.For, ast.AsyncFor, ast.While, ast.ExceptHandler,
+                             ast.IfExp, ast.comprehension, ast.Assert, ast.match_case)):
+            score += 1                                         # each of these can send execution two ways
+        elif isinstance(node, ast.BoolOp):
+            score += len(node.values) - 1                      # a and b and c holds two decisions
+    return score
+
+print(f"[measure] complexity: a plain assignment {complexity('x = 1')}, one conditional expression {complexity('y = 1 if x else 2')}")
+
+#%% code
+for snippet in ("x = 1", "if a and b:\n    x = 1", "ys = [y for y in xs if y]"):
+    print(f"  complexity {complexity(snippet)}: {snippet!r}")
+
+#%% md
+**`DEFS`** is the register of every definition in the notebook, keyed by name, each with its layer (host, plugin or lab), its size and its complexity. `show_def` fills it, and S95 reads it to weigh the system against the lab that tests it.
+
+#%% code
+DEFS = {}   # every definition in the notebook, by layer: this is how big the system is
+print(f"[defs] register ready, {len(DEFS)} definitions so far")
+
+#%% md
+**`source_of(obj)`** returns the source text of a function or a class. `inspect.getsource` does this for functions, but on Python 3.12 it cannot find a class defined in a notebook cell, because a cell is not a file. Jupyter does keep the text of every cell it has run in `linecache`, so the fallback searches those texts, newest first, and cuts the class out using the positions the syntax tree records.
+
+#%% code
+def source_of(obj):
+    """inspect.getsource, plus what it cannot do on Python 3.12: find a class defined in a
+    notebook cell. Jupyter keeps every cell in linecache, so take the newest cell that
+    defines a class of that name."""
+    try:
+        return inspect.getsource(obj)                          # functions, and classes defined in files
+    except (OSError, TypeError):
+        for name in reversed(list(linecache.cache)):           # newest cell first: a redefined class wins
+            text = "".join(linecache.cache[name][2])           # the cell's lines, joined back into one text
+            if f"class {obj.__name__}" not in text:            # a cheap text test before any parsing
+                continue
+            try:
+                tree = ast.parse(text)
+            except SyntaxError:                                # not Python, or a cell that never parsed
+                continue
+            for node in ast.walk(tree):
+                if isinstance(node, ast.ClassDef) and node.name == obj.__name__:
+                    return ast.get_source_segment(text, node, padded=True)   # the class, indented as written
+        raise                                                  # found nowhere: the original error stands
+
+print(f"[measure] source_of finds the text of a function, even one defined in a notebook cell: {source_of(bar).splitlines()[0]!r}")
+
+#%% code
+print(f"[source_of] {source_of(bar).splitlines()[0]}")        # a function defined a few cells above
+
+#%% md
+**`show_def(*objs, layer="lab")`** prints one line for each definition: its name, its signature and its size, counting lines that are neither blank nor comments. It also files the definition in `DEFS` under its layer, which is why every definition cell in the notebook ends with it. Signatures go through `scrub()`, because a default value can be a path on this machine.
+
+#%% code
+def show_def(*objs, layer="lab"):
+    """One line per definition: its name, signature, and what it cost in lines."""
+    for obj in objs:                                  # several definitions can share one call
+        src = textwrap.dedent(source_of(obj))         # dedented, so a method's source reads like a function's
+        # lines that cost something: not blank and not a comment line (docstrings do count)
+        n = sum(1 for ln in src.splitlines() if ln.strip() and not ln.strip().startswith("#"))
+        try:
+            sig = str(inspect.signature(obj))         # such as (rows, cols, indent=2)
+        except (TypeError, ValueError):               # some objects have no signature to show
+            sig = ""
+        sig = scrub(sig)                              # a default such as ROOT would print an absolute path
+        sig = sig if len(sig) <= 70 else sig[:67] + "...)"   # a long signature is cut, keeping its bracket
+        kind = "class" if inspect.isclass(obj) else "def"
+        name = obj.__qualname__                       # Host.loop and LeanPlugin.install stay apart
+        DEFS[name] = {"layer": layer, "lines": n, "complexity": complexity(src), "obj": obj}
+        print(f"[{kind}] {name}{sig}  {n} lines, complexity {DEFS[name]['complexity']}")
+
+show_def(table, bar, complexity, source_of, show_def)
+
+#%% md
+The setup helpers above were written before `show_def` existed, so they are filed in `DEFS` here, in the lab layer like the rest of Part I.
+
+#%% code
+show_def(_place_pattern, rel, scrub, _warn_scrubbed, set_determinism, finish, panel, widgets, _cell)
+
+#%% md
+**Building a class one method at a time.** The larger classes in this notebook (the host, the ledger, the plugin) are easier to follow one method per cell, each with its own explanation and its own small demonstration. Python allows that directly: a function defined at module level becomes a method as soon as it is set as an attribute of the class. `method_of` does exactly that and nothing more. It also gives the function its proper name (`Host.loop` rather than `loop`) and leaves the notebook's own names alone, so attaching a method called `status` cannot quietly replace a function called `status` defined somewhere else.
+
+#%% code
+def method_of(cls):
+    """Attach the decorated function to `cls` as a method, so a class can be built one
+    method per cell. The notebook's own global names are left exactly as they were."""
+    def attach(fn):
+        fn.__qualname__ = f"{cls.__name__}.{fn.__name__}"   # reads as Host.loop in show_def and in tracebacks
+        setattr(cls, fn.__name__, fn)                         # from here on every instance has the method
+        return fn.__globals__.get(fn.__name__, fn)            # an existing global of the same name survives
+    return attach
+
+show_def(method_of)
+
+#%% md
+A small demonstration, starting with a class that has nothing in it.
+
+#%% code
+class _Demo:                                                  # a throwaway class, only for this demonstration
+    pass
+
+print(f"[method_of] before: does _Demo have hello? {hasattr(_Demo, 'hello')}")
+
+#%% md
+Now a method written outside the class, and attached to it with `method_of`.
+
+#%% code
+@method_of(_Demo)
+def hello(self):                                              # written outside the class body...
+    return "attached"
+
+print(f"[method_of] _Demo().hello() -> {_Demo().hello()!r}; registered as {_Demo.hello.__qualname__}")
+
+#%% md
+**`_round(o, nd=4)`** prepares a result for json: floats rounded to four places, NaN and infinity stored as `null`, tuples turned into lists, numpy scalars into plain Python values. Rounding once, here, means float noise, such as the seventeen digits Python prints for `0.1 + 0.2`, never reaches the prose that quotes these records.
+
+#%% code
+# ---- experiment records: every number the prose quotes comes from one of these files
+def _round(o, nd=4):
+    if isinstance(o, float):                                  # numpy's float64 is a float too, so it lands here
+        return round(o, nd) if math.isfinite(o) else None     # json has no NaN or infinity: store null
+    if isinstance(o, dict):
+        return {str(k): _round(v, nd) for k, v in o.items()}  # json keys are always strings
+    if isinstance(o, (list, tuple)):
+        return [_round(v, nd) for v in o]                     # a tuple comes back as a list either way
+    if isinstance(o, np.bool_):                               # numpy booleans are not json booleans
+        return bool(o)
+    if isinstance(o, (np.integer,)):
+        return int(o)
+    if isinstance(o, (np.floating,)):
+        return _round(float(o), nd)                           # then rounded like any other float
+    return o
+
+show_def(_round)
+
+#%% code
+print(_round({"ratio": 2 / 3, "missing": float("nan"), "flags": (np.bool_(True), np.int64(3)), 7: 0.1 + 0.2}))
+
+#%% md
+**`save_exp(name, obj)`** writes one experiment record, `exp_<name>.json`, into the artifacts folder. These files are the only source of the numbers in the prose: the build fills every quoted figure from them, so a sentence cannot quote a number the code did not produce. It returns nothing on purpose, so a cell that ends with it prints no stray dict.
+
+#%% code
+def save_exp(name, obj):
+    """Write artifacts/exp_<name>.json with floats rounded, so float noise never reaches
+    the prose. Returns nothing, so a cell that ends with it prints no stray dict."""
+    path = ART / f"exp_{name}.json"                          # artifacts/ in a live run, the smoke folder otherwise
+    # default=str: a value json cannot hold, such as a Path, is stored as its text
+    path.write_text(json.dumps(_round(obj), indent=2, default=str), encoding="utf-8")
+    print(f"[exp] {rel(path)}")                              # where it went, as a relative path
+
+show_def(save_exp)
+
+#%% md
+**`load_exp(name, default=None)`** reads a record back, or returns `default` when it has not been written yet. Later Parts use it to pick up results saved by earlier sections, such as the main experiment's record.
+
+#%% code
+def load_exp(name, default=None):
+    path = ART / f"exp_{name}.json"          # the file save_exp writes for this name
+    if not path.exists():                    # not written yet: the caller decides what that means
+        return default
+    return json.loads(path.read_text(encoding="utf-8"))   # exactly what was saved, floats already rounded
+
+show_def(load_exp)
+
+#%% code
+print(f"[exp] a record that does not exist yet reads as its default: {load_exp('not_written_yet', default={})}")
+print("[setup] OK, Part I needs nothing else; no model is called before Part III")
+
+#%% md
+## S1 - Ten specimens: same behaviour, very different size
+
+**Theory.** Before building anything that detects over-engineering, we need ground truth: pairs of programs that do exactly the same thing, one of them written the way agents often write code and one written the way it needs to be. "Exactly the same thing" is checked, not asserted: each pair is run on the same inputs and its outcomes (return value, or exception type) are compared. A pair that disagrees on any input is not a specimen, it is a bug, and the run below would print it.
+
+**In plain terms.** Ten small programs, each written twice. Same answers, very different amounts of code. These pairs are the yardstick for every detector in Part I.
+
+The bloated versions are not strawmen. Each one is the kind of code that looks responsible when it is written: an interface "in case we add SMS later", a configuration object "so the rate can change", a retry "for robustness".
+
+#%% md
+**`specimen(name, shape, entry, calls, bloated, lean)`** files one pair in `SPECIMENS`: a name, the number of the shape it shows, the function both versions define, the inputs to call it with, and the two programs. The programs sit indented inside the cells, where they read better; `specimen` dedents them and gives each exactly one final newline, because otherwise every line count below would depend on how the text happened to be typed.
+
+#%% code
+SPECIMENS = []   # every pair, in shape order; the meter and the detectors are tested against these
+
+def specimen(name, shape, entry, calls, bloated, lean):
+    # one dict per pair; the order of the calls below is the order of the shapes
+    SPECIMENS.append({"name": name, "shape": shape, "entry": entry, "calls": calls,
+                      # written indented in the cell, stored flush left with one final newline
+                      "bloated": textwrap.dedent(bloated).strip() + "\n",
+                      "lean": textwrap.dedent(lean).strip() + "\n"})
+
+show_def(specimen)
+
+#%% md
+**Shape 1, an interface with one implementation.** The bloated notifier defines an abstract `Notifier` so that another channel can be added later, one `EmailNotifier` that implements it, and a `notify` that accepts any channel and defaults to email. There is one channel, so all of that structure comes down to a single formatted string, which is what the lean version returns.
+
+#%% code
+# ---- specimens 1 to 5 -------------------------------------------------------------
+# name, shape, the function both versions define, then its inputs: two addresses, two messages
+specimen("notifier", 1, "notify", [("ann@x.org", "hi"), ("bo@y.com", "your order shipped")],
+    bloated='''
+    from abc import ABC, abstractmethod
+
+
+    class Notifier(ABC):
+        """Base class for every notification channel."""
+
+        @abstractmethod
+        def send(self, to: str, message: str) -> str:
+            """Send a message to a recipient."""
+
+
+    class EmailNotifier(Notifier):
+        """Email implementation of the Notifier interface."""
+
+        def __init__(self, sender: str = "noreply@example.com"):
+            self.sender = sender
+
+        def send(self, to: str, message: str) -> str:
+            return f"{self.sender} -> {to}: {message}"
+
+
+    def notify(to: str, message: str, notifier: Notifier | None = None) -> str:
+        """Notify a user through the configured channel."""
+        notifier = notifier or EmailNotifier()
+        return notifier.send(to, message)
+    ''',
+    lean='''
+    def notify(to, message):
+        return f"noreply@example.com -> {to}: {message}"
+    ''')
+print(f"[specimens] {len(SPECIMENS)} defined so far")
+
+#%% md
+**Shape 2, a factory with one product.** A base `Parser`, a `CsvParser` and a `ParserFactory` whose registry can be extended at run time, all to split text on commas. The registry has one entry and `parse_rows` always asks for it by name, so the lean version is the one comprehension that does the splitting.
+
+#%% code
+# two texts, the second with an empty line that both versions must skip
+specimen("row parser", 2, "parse_rows", [("a,b\nc,d\n",), ("x\n\ny,z",)],
+    bloated='''
+    class Parser:
+        def parse(self, text):
+            raise NotImplementedError
+
+
+    class CsvParser(Parser):
+        def __init__(self, delimiter=","):
+            self.delimiter = delimiter
+
+        def parse(self, text):
+            return [line.split(self.delimiter) for line in text.splitlines() if line]
+
+
+    class ParserFactory:
+        _registry = {"csv": CsvParser}
+
+        @classmethod
+        def register(cls, name, parser_cls):
+            cls._registry[name] = parser_cls
+
+        @classmethod
+        def create(cls, kind="csv", **options):
+            if kind not in cls._registry:
+                raise ValueError(f"unknown parser: {kind}")
+            return cls._registry[kind](**options)
+
+
+    def parse_rows(text):
+        return ParserFactory.create("csv").parse(text)
+    ''',
+    lean='''
+    def parse_rows(text):
+        return [line.split(",") for line in text.splitlines() if line]
+    ''')
+print(f"[specimens] {len(SPECIMENS)} defined so far")
+
+#%% md
+**Shape 3, configuration for a constant.** VAT is 20%, and the bloated version wraps that number in a frozen dataclass that can be read from an environment variable, validated, and passed in. Nothing ever passes a different configuration, so the lean version names the constant and uses it.
+
+#%% code
+# three net prices, zero included
+specimen("vat", 3, "gross", [(10.0,), (19.99,), (0.0,)],
+    bloated='''
+    import os
+    from dataclasses import dataclass
+
+
+    @dataclass(frozen=True)
+    class PricingConfig:
+        vat_rate: float = 0.20
+        currency: str = "GBP"
+        decimals: int = 2
+
+        @classmethod
+        def from_env(cls):
+            return cls(vat_rate=float(os.environ.get("VAT_RATE", "0.20")))
+
+        def validate(self):
+            if not 0 <= self.vat_rate < 1:
+                raise ValueError("vat_rate out of range")
+            return self
+
+
+    def gross(net, config=None):
+        config = (config or PricingConfig.from_env()).validate()
+        return round(net * (1 + config.vat_rate), config.decimals)
+    ''',
+    lean='''
+    VAT = 0.20
+
+
+    def gross(net):
+        return round(net * (1 + VAT), 2)
+    ''')
+print(f"[specimens] {len(SPECIMENS)} defined so far")
+
+#%% md
+**Shape 4, speculative parameters.** Seven optional parameters, each documented, each for a need nobody has yet: other greeting words, shouting, prefixes and suffixes, and a locale "reserved for future internationalisation". Every caller passes a name and nothing else.
+
+#%% code
+# two names: the only argument any caller passes
+specimen("greeting", 4, "greet", [("Ada",), ("Grace",)],
+    bloated='''
+    def greet(name, greeting="Hello", punctuation="!", uppercase=False,
+              prefix="", suffix="", separator=", ", locale=None):
+        """Build a greeting.
+
+        Args:
+            name: the person to greet
+            greeting: the greeting word, configurable for future locales
+            punctuation: trailing punctuation
+            uppercase: shout the greeting
+            prefix: text before the greeting
+            suffix: text after the greeting
+            separator: between the greeting and the name
+            locale: reserved for future internationalisation
+        """
+        text = f"{prefix}{greeting}{separator}{name}{punctuation}{suffix}"
+        return text.upper() if uppercase else text
+    ''',
+    lean='''
+    def greet(name):
+        return f"Hello, {name}!"
+    ''')
+print(f"[specimens] {len(SPECIMENS)} defined so far")
+
+#%% md
+**Shape 5, the standard library written by hand.** A dictionary of counts and a hand-written insertion sort, which `collections.Counter` already provides as `most_common`. The two versions agree on ties as well: words with the same count stay in the order they first appeared.
+
+#%% code
+# a sentence with ties, punctuation and mixed case, and a single word
+specimen("top words", 5, "top_words",
+    [("the cat and the hat and the bat",), ("A b, a. B c!",), ("one",)],
+    bloated='''
+    def top_words(text, n=3):
+        counts = {}
+        for word in text.lower().split():
+            word = word.strip(".,;:!?")
+            if not word:
+                continue
+            if word in counts:
+                counts[word] = counts[word] + 1
+            else:
+                counts[word] = 1
+        ranked = []
+        for word, count in counts.items():
+            pos = len(ranked)
+            while pos > 0 and ranked[pos - 1][1] < count:
+                pos -= 1
+            ranked.insert(pos, (word, count))
+        return ranked[:n]
+    ''',
+    lean='''
+    from collections import Counter
+
+
+    def top_words(text, n=3):
+        words = (w.strip(".,;:!?") for w in text.lower().split())
+        return Counter(w for w in words if w).most_common(n)
+    ''')
+print(f"[specimens] {len(SPECIMENS)} defined so far")
+
+#%% md
+**Shape 6, a wrapper that only delegates.** `SessionStore` puts five methods in front of a dictionary, each forwarding to the dictionary underneath, and two of them (`has` and `keys`) are never called. The lean version uses the dictionary directly; it still has to dispatch the three operations itself, which is why this pair saves less than its size suggests.
+
+#%% code
+# ---- specimens 6 to 10 ------------------------------------------------------------
+# two scripts of set, get and del, one of them reading a key that was never set
+specimen("session store", 6, "run_session",
+    [([("set", "a", 1), ("get", "a", None), ("del", "a", None), ("get", "a", None)],),
+     ([("get", "missing", None), ("set", "k", "v"), ("set", "k", "w"), ("get", "k", None)],)],
+    bloated='''
+    class SessionStore:
+        """Thin abstraction over the session storage backend."""
+
+        def __init__(self):
+            self._data = {}
+
+        def set(self, key, value):
+            self._data[key] = value
+
+        def get(self, key, default=None):
+            return self._data.get(key, default)
+
+        def has(self, key):
+            return key in self._data
+
+        def delete(self, key):
+            self._data.pop(key, None)
+
+        def keys(self):
+            return list(self._data.keys())
+
+
+    def run_session(ops):
+        store = SessionStore()
+        out = []
+        for op, key, value in ops:
+            if op == "set":
+                store.set(key, value)
+            elif op == "get":
+                out.append(store.get(key))
+            elif op == "del":
+                store.delete(key)
+        return out
+    ''',
+    lean='''
+    def run_session(ops):
+        store, out = {}, []
+        for op, key, value in ops:
+            if op == "set":
+                store[key] = value
+            elif op == "get":
+                out.append(store.get(key))
+            elif op == "del":
+                store.pop(key, None)
+        return out
+    ''')
+print(f"[specimens] {len(SPECIMENS)} defined so far")
+
+#%% md
+**Shape 7, defensive ceremony.** Retries, a logger and a pause between attempts, all around a call to `int()` that fails the same way every time it is given the same text. The lean version keeps the one check that matters, the refusal of a negative port, and lets `int()` raise as it would anyway.
+
+#%% code
+# a plain port, one wrapped in spaces, a negative one, and text that is not a number
+specimen("port parser", 7, "parse_port", [("8080",), (" 443 ",), ("-1",), ("x",)],
+    bloated='''
+    import logging
+    import time
+
+    log = logging.getLogger(__name__)
+
+
+    def parse_port(value, retries=3, delay=0.0):
+        last_error = None
+        for attempt in range(1, retries + 1):
+            try:
+                port = int(str(value).strip())
+                if port < 0:
+                    raise ValueError("negative port")
+                return port
+            except (TypeError, ValueError) as exc:
+                last_error = exc
+                log.debug("parse_port attempt %d failed: %s", attempt, exc)
+                time.sleep(delay)
+        raise ValueError(f"could not parse port after {retries} attempts") from last_error
+    ''',
+    lean='''
+    def parse_port(value):
+        port = int(str(value).strip())
+        if port < 0:
+            raise ValueError("negative port")
+        return port
+    ''')
+print(f"[specimens] {len(SPECIMENS)} defined so far")
+
+#%% md
+**Shape 8, concurrency before it is needed.** A pool of eight threads to multiply a list of prices by 1.2. None of the work waits on anything, so the threads cannot make it faster; a list comprehension gives the same list in one line.
+
+#%% code
+# three prices, and an empty list
+specimen("price batch", 8, "prices_with_tax", [([1.0, 2.5, 10.0],), ([],)],
+    bloated='''
+    from concurrent.futures import ThreadPoolExecutor
+
+
+    def prices_with_tax(prices, workers=8):
+        def one(price):
+            return round(price * 1.2, 2)
+
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            return list(pool.map(one, prices))
+    ''',
+    lean='''
+    def prices_with_tax(prices):
+        return [round(p * 1.2, 2) for p in prices]
+    ''')
+print(f"[specimens] {len(SPECIMENS)} defined so far")
+
+#%% md
+**Shape 9, a dependency for something the standard library does.** `dateutil` is a good library, but reading an ISO date has been built into Python since 3.7 as `date.fromisoformat`. Both versions are three lines long; the cost of the bloated one is a package to install, pin and keep up to date, and no line count can see it.
+
+#%% code
+# two ISO dates
+specimen("day parser", 9, "parse_day", [("2026-03-07",), ("2026-12-31",)],
+    bloated='''
+    from dateutil import parser as date_parser   # pip install python-dateutil
+
+
+    def parse_day(text):
+        return date_parser.isoparse(text).date()
+    ''',
+    lean='''
+    from datetime import date
+
+
+    def parse_day(text):
+        return date.fromisoformat(text)
+    ''')
+print(f"[specimens] {len(SPECIMENS)} defined so far")
+
+#%% md
+**Shape 10, prose padding.** One line of code under a docstring that recounts the designs considered and rejected, plus three comment lines defending the use of `min` and `max`. None of it tells a reader anything the line itself does not, and all of it has to be kept true every time the code changes.
+
+#%% code
+# a value inside the range, one below it and one above it
+specimen("clamp", 10, "clamp", [(5, 0, 10), (-1, 0, 10), (15, 0, 10)],
+    bloated='''
+    def clamp(value, low, high):
+        """Clamp a value into a closed interval.
+
+        This function exists because clamping is a common operation and having a
+        single, well-documented place for it makes the codebase easier to reason
+        about. We considered several alternative designs, including a Clamp class
+        with configurable boundary behaviour, a decorator that clamps return
+        values, and a policy object, but decided that a plain function offers the
+        best balance of simplicity and flexibility for now. Should requirements
+        change, for example to support open intervals or wrap-around semantics,
+        this function can be extended without affecting callers.
+
+        Args:
+            value: the number to clamp
+            low: the lower bound, inclusive
+            high: the upper bound, inclusive
+
+        Returns:
+            The value, limited to the interval [low, high].
+        """
+        # We deliberately use min and max here rather than explicit branches,
+        # because this reads more clearly and performs well for scalar inputs.
+        # If profiling ever shows this to be a hot path, consider inlining it.
+        return max(low, min(value, high))
+    ''',
+    lean='''
+    def clamp(value, low, high):
+        return max(low, min(value, high))
+    ''')
+print(f"[specimens] {len(SPECIMENS)} defined so far")
+
+#%% md
+**`SHAPES`** names the ten shapes by number. Every table and figure from here on labels a shape with this name.
+
+#%% code
+# shape number, then the short name every table and figure uses
+SHAPES = {1: "interface, one impl", 2: "factory, one product", 3: "config for a constant",
+          4: "speculative parameters", 5: "hand-rolled stdlib", 6: "delegating wrapper",
+          7: "defensive ceremony", 8: "premature concurrency", 9: "needless dependency",
+          10: "prose padding"}
+print(f"[specimens] {len(SPECIMENS)} defined, one per shape: {sorted(s['shape'] for s in SPECIMENS)}")
+
+#%% md
+**`load_fn(src, name)`** runs one program in a fresh namespace and hands back the function called `name`. A fresh namespace for each program means the bloated and lean versions never see each other's names. Running code with `exec` is safe here only because these programs are our own: code an agent writes never runs in the notebook's process, and Part II builds the sandbox it runs in instead.
+
+#%% code
+def load_fn(src, name):
+    """Execute a specimen in a fresh namespace and return one function from it.
+    Specimens are our own code, so exec is safe here; agent code never runs this way
+    (Part II gives it a sandbox)."""
+    ns = {"__name__": "specimen"}                    # a module of its own, so nothing leaks between programs
+    exec(compile(src, f"<{name}>", "exec"), ns)      # tracebacks name the program, such as <notify>
+    return ns[name]
+
+show_def(load_fn)
+
+#%% code
+notify_lean = load_fn(SPECIMENS[0]["lean"], "notify")         # the lean notifier, ready to call
+print(f"[load_fn] notify('ann@x.org', 'hi') returns {notify_lean('ann@x.org', 'hi')!r}")
+
+#%% md
+**`outcome(fn, args)`** turns one call into something two programs can be compared on: `("ok", value)` when it returns, `("raises", name)` when it fails. Comparing the exception's type rather than its message is deliberate. The bloated port parser says "could not parse port after 3 attempts" where the lean one says "negative port", and both are the same refusal.
+
+#%% code
+def outcome(fn, args):
+    """What a call does: ('ok', value) or ('raises', exception type name)."""
+    try:
+        return ("ok", fn(*args))                 # it returned: keep the value for comparison
+    except Exception as e:                       # the type, not the message: wording may differ, behaviour may not
+        return ("raises", type(e).__name__)
+
+show_def(outcome)
+
+#%% code
+port_lean = load_fn(SPECIMENS[6]["lean"], "parse_port")      # the lean port parser
+for port_text in ("8080", "-1", "x"):
+    print(f"  outcome(parse_port, ({port_text!r},)) = {outcome(port_lean, (port_text,))}")
+
+#%% md
+**`nonblank(src)`** is the naive line count: every line that is not empty. S1 uses it on purpose, as the number a casual reader would quote, and S2 then shows how much of it is not code at all.
+
+#%% code
+def nonblank(src):
+    return sum(1 for ln in src.splitlines() if ln.strip())   # comments and docstrings count here; S2 separates them
+
+show_def(nonblank)
+
+#%% code
+clamp_bloated = SPECIMENS[9]["bloated"]
+print(f"[nonblank] the bloated clamp: {len(clamp_bloated.splitlines())} lines, {nonblank(clamp_bloated)} of them not blank")
+
+#%% md
+**`third_party(src)`** counts the imports in a program that name a module outside the standard library. It fills the column a line count cannot: the two versions of the day parser are the same length, and only this count tells them apart. The test is textual (the first word after `import` or `from` at the start of a line), which is enough for programs we wrote ourselves; S3 has a stricter detector that reads the syntax tree.
+
+#%% code
+def third_party(src):
+    count = 0
+    # the first word after `from` or `import` at the start of a line: the package someone has to install
+    for m in re.findall(r"^\s*(?:from|import)\s+(\w+)", src, re.M):
+        if m not in sys.stdlib_module_names:         # Python's own list of standard-library modules
+            count += 1
+    return count
+
+show_def(third_party)
+
+#%% code
+print(f"[third_party] day parser: bloated {third_party(SPECIMENS[8]['bloated'])}, lean {third_party(SPECIMENS[8]['lean'])}")
+
+#%% md
+Every pair now runs on its inputs, and its two versions must agree on each one. A pair whose bloated version cannot be loaded, because its third-party package is missing, is marked SKIPPED rather than counted as agreeing.
+
+#%% code
+rows = []                                                      # one row per specimen
+for s in SPECIMENS:
+    try:
+        fb = load_fn(s["bloated"], s["entry"])                 # the bloated program's entry function
+        fl = load_fn(s["lean"], s["entry"])                    # and the lean one's
+        same = all(outcome(fb, a) == outcome(fl, a) for a in s["calls"])   # same value or same error, every input
+        note = ""
+    except ImportError as e:            # the dependency specimen needs python-dateutil
+        same, note = None, f"skipped: {e.name} not installed"
+    if same:
+        verdict = "PASSED"
+    elif same is None:                                         # could not run, which is not the same as agreeing
+        verdict = "SKIPPED"
+    else:
+        verdict = "FAILED"
+    rows.append({"specimen": s["name"], "shape": SHAPES[s["shape"]],
+                 "bloated": nonblank(s["bloated"]), "lean": nonblank(s["lean"]),
+                 "ratio": nonblank(s["bloated"]) / nonblank(s["lean"]),
+                 # third-party imports in the bloated version, then in the lean one
+                 "deps": f"{third_party(s['bloated'])} -> {third_party(s['lean'])}",
+                 "same": verdict,
+                 "calls": len(s["calls"])})
+    if note:
+        print("  " + note)                                     # which pair was not compared, and why
+print(f"[specimens] {sum(r['same'] == 'PASSED' for r in rows)} of {len(rows)} pairs behave the same on every input")
+
+#%% md
+The table, the totals, and the record that the reading of FIG 1 quotes.
+
+#%% code
+# one row per pair: naive line counts, their ratio, dependencies, and the behaviour verdict
+table(rows, [("specimen", "specimen", ""), ("shape", "shape", ""), ("bloated", "bloated", "d"),
+             ("lean", "lean", "d"), ("ratio", "x", ".1f"), ("deps", "3rd-party deps", ""),
+             ("calls", "inputs", "d"), ("same", "same behaviour", "")])
+total_b = sum(r["bloated"] for r in rows)                      # non-blank lines over the ten bloated versions
+total_l = sum(r["lean"] for r in rows)                         # and over the ten lean ones
+# SKIPPED is allowed through; a pair that ran and disagreed is not
+assert all(r["same"] != "FAILED" for r in rows), "a specimen pair disagrees: it is a bug, not a specimen"
+print(f"\n  non-blank lines: bloated {total_b}, lean {total_l}  ->  {total_b / total_l:.1f}x for identical behaviour")
+print("  -> the day parser is the same length both ways and still the worst of the ten:")
+print("     a line count cannot see a dependency")
+save_exp("taxonomy", {"rows": rows, "total_bloated": total_b, "total_lean": total_l,
+                      "ratio": total_b / total_l,
+                      # the per-specimen ratios the prose quotes, keyed without spaces
+                      "by_name": {r["specimen"].replace(" ", "_"): r["ratio"] for r in rows}})
+
+#%% code
+# FIG  how much code each shape costs, for the same behaviour
+fig, ax = plt.subplots(figsize=(9.5, 3.8))
+names = [r["specimen"] for r in rows]                          # the specimens, in table order
+y = np.arange(len(rows))                                       # one row of the chart per specimen
+ax.barh(y + 0.2, [r["bloated"] for r in rows], 0.38, color=C8, label="bloated")   # red, just below the row's centre
+ax.barh(y - 0.2, [r["lean"] for r in rows], 0.38, color=C1, label="lean")         # blue, just above it
+for i, r in enumerate(rows):
+    # each bar's count, written just past its end
+    ax.text(r["bloated"] + 0.4, i + 0.2, f'{r["bloated"]}', va="center", fontsize=8, color=INK2)
+    ax.text(r["lean"] + 0.4, i - 0.2, f'{r["lean"]}', va="center", fontsize=8, color=INK2)
+ax.set_yticks(y, [f'{r["specimen"]}  ({r["shape"]})' for r in rows])
+ax.invert_yaxis()                                              # the first specimen at the top
+ax.set_xlabel("non-blank lines")
+ax.legend(loc="lower right")
+panel(ax, "every pair returns the same values and raises the same errors")
+finish(fig, "s1_specimens", f"Same behaviour, {total_b / total_l:.1f}x the lines",
+       "ten pairs, behaviour compared on every input; the dependency pair is short and still the worst")
+
+#%% md
+**Reading FIG 1 (s1_specimens).** Each pair of bars is one program written twice. The red bar is the version an agent tends to produce, the blue bar the version the task needs, and the two were checked to behave identically on every input listed. The largest ratios come from two very different places: prose (the clamp, {{exp:taxonomy.by_name.clamp:.1f}}x, almost all of it docstring) and structure (the factory, {{exp:taxonomy.by_name.row_parser:.1f}}x, and the one-implementation interface, {{exp:taxonomy.by_name.notifier:.1f}}x). The delegating wrapper costs less than it looks ({{exp:taxonomy.by_name.session_store:.1f}}x), because the lean version still has to do the same work inline. The day parser is the useful outlier: the same length both ways, and still the worst of the ten, because one of the two versions brings a third-party package with it. That is why the rest of this Part never relies on line counts alone.
+
+#%% md
+## S2 - The bloat meter: counting lines that cannot be gamed
+
+**Theory.** "Lines of code" is a weak metric when it is counted naively and a useful one when it is counted carefully. Three corrections matter. First, a line is only *code* if it is not blank, not a full-line comment and not part of a docstring; we take comments from the tokenizer (so a `#` inside a string stays code) and docstrings from the syntax tree (so only the string that opens a module, class or function counts as prose). Second, a self-check that the agent leaves behind on purpose (an `if __name__ == "__main__":` block of asserts, or a `def selfcheck():`) is moved into its own bucket, because our system *asks* for one runnable check and must not be punished for writing it. Third, when we measure a change we count only the lines the change **added**, using a line-level diff against the seed, so a file the agent merely touched is not charged for its existing contents.
+
+**In plain terms.** We count real code only, we do not punish the one test we asked for, and we count what the agent added, not what was already there.
+
+**How one added line is classified.** The tests run in order and the first match wins, so a comment in a test file is still prose and a docstring is never mistaken for code. Only the last bucket is the number this notebook calls added code.
+
+{{diagram:meter}}
+
+#%% md
+The meter needs three more modules from the standard library. The tokenizer is the important one: it reads source the way Python does, so it knows a real comment from a `#` that sits inside a string, which no text search can.
+
+#%% code
+import io            # the tokenizer reads source through a file-like object
+import tokenize      # Python's own tokenizer: a comment is a token, a '#' inside a string is not
+import difflib       # the line diff behind added_lines()
+from collections import Counter   # tallies of line labels
+
+# what the tokenizer sees in a line that a text search would call a comment
+for tok in tokenize.generate_tokens(io.StringIO('x = "# not a comment"  # a comment\n').readline):
+    if tok.type in (tokenize.STRING, tokenize.COMMENT):
+        print(f"  {tokenize.tok_name[tok.type]:<8} {tok.string}")
+
+#%% md
+**`classify_lines(src)`** gives every line of a program one label: blank, comment, docstring or code. Comments come from the tokenizer, and a line counts as a comment only when the comment is all it holds. Docstrings come from the syntax tree, so only the string that opens a module, class or function is prose, and a string anywhere else is code. Source that cannot be tokenized falls back to a plain prefix test, and source that does not parse keeps its comment labels but has no docstrings.
+
+#%% code
+def classify_lines(src):
+    """Label every line of a Python source: blank, comment, docstring or code."""
+    lines = src.splitlines()                         # one entry per line, numbered like the labels
+    labels = ["blank" if not ln.strip() else "code" for ln in lines]   # every line starts as code or blank
+    try:
+        for tok in tokenize.generate_tokens(io.StringIO(src).readline):   # the tokens Python itself would read
+            # a comment token on a line that starts with '#': the whole line is a comment
+            if tok.type == tokenize.COMMENT and lines[tok.start[0] - 1].lstrip().startswith("#"):
+                labels[tok.start[0] - 1] = "comment"     # token lines count from 1, the list from 0
+    except (tokenize.TokenError, IndentationError, SyntaxError):   # such as an unclosed bracket
+        for i, ln in enumerate(lines):               # broken source: fall back to a prefix test
+            if ln.lstrip().startswith("#"):
+                labels[i] = "comment"
+    try:
+        tree = ast.parse(src)
+    except SyntaxError:                              # no tree, so no docstrings to find
+        return labels
+    for node in ast.walk(tree):                      # the module, and every class and function at any depth
+        if isinstance(node, (ast.Module, ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)) and node.body:
+            first = node.body[0]                     # only the first statement can be a docstring
+            # a docstring is a bare string as the first statement of a module, class or function
+            is_docstring = (isinstance(first, ast.Expr) and isinstance(first.value, ast.Constant)
+                            and isinstance(first.value.value, str))
+            if is_docstring:
+                for r in range(first.lineno - 1, first.end_lineno):   # every line the string spans
+                    if labels[r] != "blank":         # a blank line inside a docstring stays blank
+                        labels[r] = "docstring"
+    return labels
+
+show_def(classify_lines)
+
+#%% md
+The bloated notifier, labelled line by line:
+
+#%% code
+demo = SPECIMENS[0]["bloated"]          # the notifier, with its interface and docstrings
+# each line with its label, numbered from 1 as an editor shows them
+for n, (label, ln) in enumerate(zip(classify_lines(demo), demo.splitlines()), 1):
+    if label != "blank":                # blank lines would only add noise here
+        print(f"  {n:>3}  {label:<9}  {ln[:70]}")
+print("\n  counts:", dict(sorted(Counter(classify_lines(demo)).items())))   # every label, totalled
+
+#%% md
+**`check_tail_start(src)`** finds where a program's self-check begins: the first line, at the top level, that opens an `if __name__ == "__main__":` block or defines a function called `demo`, `selfcheck`, `check` or `smoke` (with or without a leading underscore). Everything from that line to the end is the check tail. The system asks the agent for exactly one runnable check, so the meter must not charge it as code.
+
+#%% code
+# the first line of a self-check: the main guard, or a function named for what it does
+CHECK_START = re.compile(r"^(if __name__\s*==|def _?(demo|selfcheck|check|smoke)\s*\()")
+
+def check_tail_start(src):
+    """Index of the first top-level line that begins a self-check, or None."""
+    for i, ln in enumerate(src.splitlines()):        # counted from 0, like the labels
+        if CHECK_START.match(ln):        # the pattern has no leading space, so indented lines never match
+            return i
+    return None
+
+show_def(check_tail_start)
+
+#%% code
+tail_demo = SPECIMENS[9]["lean"] + '\n\nif __name__ == "__main__":\n    assert clamp(5, 0, 3) == 3\n'
+print(f"[check_tail_start] the tail starts at line index {check_tail_start(tail_demo)} of:\n{tail_demo}")
+
+#%% md
+**`is_test_file(path)`** decides from its path whether a file holds tests: named `test_*.py`, `tests_*.py` or `*_test.py`, called `conftest.py`, or kept under a folder named `tests` or `test`. Code added in a test file is charged as test lines, never as code.
+
+#%% code
+def is_test_file(path):
+    p = Path(path)
+    if p.name.startswith(("test_", "tests_")) or p.name.endswith("_test.py"):   # named like a test module
+        return True
+    if p.name == "conftest.py":                                                  # pytest's fixtures file
+        return True
+    return any(part in ("tests", "test") for part in p.parts[:-1])               # or a folder above it called so
+
+show_def(is_test_file)
+
+#%% code
+for example_path in ("app.py", "test_app.py", "app_test.py", "tests/helpers.py", "conftest.py", "testing/app.py"):
+    print(f"  {example_path:<18} {'test' if is_test_file(example_path) else 'code'}")
+
+#%% md
+**`measure_source(src, path="x.py")`** counts a whole file by label: code, comment, docstring and blank, plus two buckets that are never charged as code. In a test file every code line is a test line; elsewhere, code from the start of the self-check tail onwards is a check line. The path matters only for the test rule, so text with no file behind it can be measured as `x.py`.
+
+#%% code
+def measure_source(src, path="x.py"):
+    """Counts for a whole file: code, comment, docstring, blank, plus check lines
+    (code inside a self-check tail) and test lines (code in a test file)."""
+    labels = classify_lines(src)
+    start = check_tail_start(src)
+    out = Counter(labels)                              # code, comment, docstring and blank, as labelled
+    if is_test_file(path):
+        out["test"], out["code"] = out["code"], 0      # in a test file, all the code is test code
+    elif start is not None:
+        # code lines at or after the start of the self-check tail move to the check bucket
+        moved = sum(1 for i, lab in enumerate(labels) if i >= start and lab == "code")
+        out["check"], out["code"] = moved, out["code"] - moved
+    # every bucket in a fixed order, zero when absent, so callers never test for a missing key
+    return {k: out.get(k, 0) for k in ("code", "comment", "docstring", "blank", "check", "test")}
+
+show_def(measure_source)
+
+#%% code
+print("[measure_source] the bloated notifier  :", measure_source(SPECIMENS[0]["bloated"]))
+print("[measure_source] the same, as a test   :", measure_source(SPECIMENS[0]["bloated"], "tests/test_notify.py"))
+
+#%% md
+**`added_lines(before, after)`** lists the lines of `after` that are new: inserted, or replacing a line that was there before. It uses `difflib`'s matcher with the automatic junk heuristic switched off. On a file of 200 lines or more, that heuristic ignores any line that makes up more than one percent of it, blank lines for instance, which would make the answer depend on how long the file is.
+
+#%% code
+def added_lines(before, after):
+    """0-based line numbers in `after` that are new compared with `before`."""
+    a, b = before.splitlines(), after.splitlines()   # compared line by line, not character by character
+    out = []
+    # each opcode says how one stretch of a becomes b: equal, insert, delete or replace
+    for tag, _, _, j1, j2 in difflib.SequenceMatcher(a=a, b=b, autojunk=False).get_opcodes():
+        if tag in ("insert", "replace"):         # new lines, or changed ones: both belong to the change
+            out.extend(range(j1, j2))            # j1 to j2 are positions in `after`
+    return out
+
+show_def(added_lines)
+
+#%% code
+before_demo = "a = 1\nb = 2\n"
+after_demo = "a = 1\nb = 3\nc = 4\n"                         # b changed, c is new
+print(f"[added_lines] new lines in the second version: {added_lines(before_demo, after_demo)}")
+
+#%% md
+**`measure_change(seed, final)`** measures a whole change. Its inputs map each relative path to its text: `seed` as the task handed the files over, `final` as the agent left them. Only Python files count. For each file that changed, only the added lines are labelled, so a file the agent merely touched is not charged for what it already held; added code is a test line in a test file and a check line inside the self-check tail. `removed` counts the seed's lines that did not survive. The result always has the same nine keys.
+
+#%% code
+def measure_change(seed, final):
+    """What a change added, by kind, across all Python files.
+    seed and final map each relative path to its source text."""
+    totals = Counter()
+    for path, after in final.items():
+        if not path.endswith(".py"):                       # only Python is measured
+            continue
+        before = seed.get(path, "")                        # a new file is measured against nothing
+        if after == before:                                # untouched files cost nothing
+            continue
+        totals["files_touched"] += 1
+        totals["files_new"] += path not in seed            # True counts as one
+        labels = classify_lines(after)                     # labels of the file as the agent left it
+        start = check_tail_start(after)                    # and where its self-check begins, if anywhere
+        added = added_lines(before, after)
+        for i in added:
+            lab = labels[i]
+            if lab == "code" and is_test_file(path):
+                lab = "test"                               # code in a test file is test code
+            elif lab == "code" and start is not None and i >= start:
+                lab = "check"                              # code inside the self-check tail
+            totals[f"added_{lab}"] += 1
+        # the seed's lines minus those the final file kept: what the change took out
+        totals["removed"] += len(before.splitlines()) - (len(after.splitlines()) - len(added))
+    keys = ("added_code", "added_comment", "added_docstring", "added_check", "added_test",
+            "added_blank", "removed", "files_touched", "files_new")
+    return {k: totals.get(k, 0) for k in keys}
+
+show_def(measure_change)
+
+#%% code
+change = measure_change({"app.py": "x = 1\n"},
+                        {"app.py": "x = 1\n# why y exists\ny = 2\n", "README.md": "notes\n"})
+print(f"[measure_change] {change}")
+
+#%% md
+**The meter must not be fooled.** Before it measures anything that matters, the meter faces inputs built to fool it. The first attack is random: blank lines and comments dropped into every specimen at random places, four hundred times, and the code count must never move. The rest are specific traps: a `#` inside a string, a string that is not a docstring, Windows line endings, a self-check tail, and a change to a file that already had content.
+
+#%% code
+# ---- the meter must not be fooled: property tests ------------------------------
+rng = random.Random(SEED)   # a generator of its own, so the random tests draw the same positions every run
+results = []                # every expect() lands here; each test section starts by emptying it
+print(f"[tests] positions drawn from a generator seeded @ {SEED}; {len(results)} results so far")
+
+#%% md
+**`expect(name, ok)`** is the notebook's one assertion helper. It prints a PASSED or FAILED line and appends the outcome to `results`, so a test section can run every check and show every failure before a single `assert` decides whether the instrument may be used. Every test cell from here to Part X uses it.
+
+#%% code
+def expect(name, ok):
+    """Record and print one PASSED/FAILED line; used by every test cell in the notebook."""
+    results.append((name, bool(ok)))      # looked up at each call: a later section's fresh list is the one filled
+    print(f"  {'PASSED' if ok else 'FAILED'}  {name}")
+
+show_def(expect)
+
+#%% md
+**`sprinkle(src, kind, k)`** inserts `k` blank lines or full-line comments at random places in a program. A comment is indented like the line above it, as a person would write it, and every position comes from `rng`, so each run inserts in the same places.
+
+#%% code
+def sprinkle(src, kind, k):
+    """Insert k blank lines or full-line comments at random positions."""
+    lines = src.splitlines()
+    for _ in range(k):                                                     # one insertion at a time
+        pos = rng.randrange(len(lines) + 1)                                # anywhere, including after the last line
+        indent = re.match(r"\s*", lines[pos - 1] if pos else "").group(0)  # the indentation of the line above
+        # a blank line, or a comment numbered at random so no two are alike
+        lines.insert(pos, "" if kind == "blank" else f"{indent}# note {rng.randrange(999)}")
+    return "\n".join(lines) + "\n"                                          # back to text, with a final newline
+
+show_def(sprinkle)
+
+#%% md
+Four hundred random insertions: every specimen, both versions, blank lines and then comments, ten times each, one to five lines at a time. A failure would print its own line; the summary says whether there was any.
+
+#%% code
+trials = 0                                                         # insertions tried, for the summary line
+for s in SPECIMENS:
+    for variant in ("bloated", "lean"):
+        base = measure_source(s[variant])["code"]                  # the code count before anything is inserted
+        for kind in ("blank", "comment"):
+            for _ in range(10):
+                trials += 1
+                # one to five lines at a time; the code count must not move at all
+                if measure_source(sprinkle(s[variant], kind, rng.randrange(1, 6)))["code"] != base:
+                    expect(f"{s['name']} {variant}: random {kind}s changed the code count", False)
+# passes only if no insertion above recorded a failure
+expect(f"{trials} random insertions of blank lines and comments never changed a code count",
+       all(ok for _, ok in results))
+
+#%% md
+What one of those insertions looks like, on the lean clamp. The draws come after the tests, so they change nothing above.
+
+#%% code
+sprinkled = sprinkle(SPECIMENS[9]["lean"], "comment", 2)          # two comments in a two-line function
+print(sprinkled)
+print(f"code lines: {measure_source(SPECIMENS[9]['lean'])['code']} before, {measure_source(sprinkled)['code']} after")
+
+#%% md
+The specific traps for the line labels, each built to catch one way a naive counter goes wrong.
+
+#%% code
+# a text search would call this line a comment
+expect("a '#' inside a string is code, not a comment",
+       classify_lines('x = "# not a comment"\n') == ["code"])
+# the second bare string comes after the docstring, so it is code
+expect("only the opening string of a function is a docstring",
+       classify_lines('def f():\n    """doc"""\n    "not a doc"\n    return 1\n')
+       == ["code", "docstring", "code", "code"])
+# the same program with Windows line endings
+expect("CRLF line endings give the same counts as LF",
+       measure_source(SPECIMENS[0]["bloated"].replace("\n", "\r\n")) == measure_source(SPECIMENS[0]["bloated"]))
+
+#%% md
+And the two buckets that keep the meter fair: the self-check tail, and a change charged only for what it added. One `assert` then decides.
+
+#%% code
+# the lean clamp with a two-line self-check appended
+with_check = SPECIMENS[9]["lean"] + '\n\nif __name__ == "__main__":\n    assert clamp(5, 0, 3) == 3\n'
+m = measure_source(with_check)                       # the clamp's two code lines, then the two check lines
+expect("a self-check tail is counted as check, not as code", m["code"] == 2 and m["check"] == 2)
+# one line added to an existing file, and a new test file
+m = measure_change({"a.py": "x = 1\n"}, {"a.py": "x = 1\ny = 2\n", "test_a.py": "assert True\n"})
+expect("a change is charged only for the lines it added; test files count as tests",
+       m["added_code"] == 1 and m["added_test"] == 1 and m["files_touched"] == 2 and m["files_new"] == 1)
+# one failure anywhere above stops the notebook here
+assert all(ok for _, ok in results), "the bloat meter failed its own tests"
+print(f"\n  -> {sum(ok for _, ok in results)}/{len(results)} meter checks PASSED; the meter is trusted from here on")
+
+#%% md
+The meter's first use: the ten bloated specimens again, this time split into what their lines actually are.
+
+#%% code
+comp = []                                         # one entry per specimen
+for s in SPECIMENS:
+    b = measure_source(s["bloated"])                  # every bucket, for the bloated version
+    l = measure_source(s["lean"])                     # the lean version: only its code is used
+    entry = {"specimen": s["name"]}                   # keys in a fixed order: name, bloated buckets, lean code
+    for k, v in b.items():
+        entry[f"b_{k}"] = v                           # b_code, b_comment, b_docstring and so on
+    entry["l_code"] = l["code"]
+    comp.append(entry)                                # FIG 2 reads these rows
+# the four columns worth showing, renamed for the table
+table([{"specimen": c["specimen"], "code": c["b_code"], "comment": c["b_comment"],
+        "docstring": c["b_docstring"], "lean code": c["l_code"]} for c in comp],
+      [("specimen", "specimen", ""), ("code", "bloated code", "d"), ("comment", "comment", "d"),
+       ("docstring", "docstring", "d"), ("lean code", "lean code", "d")])
+
+#%% code
+prose_b = sum(c["b_comment"] + c["b_docstring"] for c in comp)                 # comment and docstring lines, all ten
+nonblank_b = sum(c["b_code"] + c["b_comment"] + c["b_docstring"] for c in comp)
+code_b = sum(c["b_code"] for c in comp)                                         # code alone, bloated
+code_l = sum(c["l_code"] for c in comp)                                         # code alone, lean
+print(f"\n  prose share of the bloated specimens: {prose_b}/{nonblank_b} = {prose_b / nonblank_b:.0%}")
+print(f"  code-only ratio: {code_b} vs {code_l} lines = {code_b / code_l:.1f}x (raw ratio was {total_b / total_l:.1f}x)")
+save_exp("meter", {"prose_share": prose_b / nonblank_b, "code_ratio": code_b / code_l,
+                   "checks_passed": sum(ok for _, ok in results), "checks": len(results)})
+
+#%% code
+# FIG  where the lines of a bloated program go
+fig, ax = plt.subplots(figsize=(9.5, 3.6))
+y = np.arange(len(comp))
+left = np.zeros(len(comp))                           # where the next segment of each bar starts
+for key, colour, label in (("b_code", C8, "code"), ("b_docstring", C4, "docstring"), ("b_comment", C5, "comment")):
+    vals = np.array([c[key] for c in comp])
+    ax.barh(y, vals, 0.6, left=left, color=colour, label=label)
+    left += vals                                     # the next kind of line starts where this one ends
+ax.scatter([c["l_code"] for c in comp], y, color=C1, zorder=3, s=28, label="lean version, code only")
+ax.set_yticks(y, [c["specimen"] for c in comp])
+ax.invert_yaxis()                                    # the first specimen at the top
+ax.set_xlabel("lines in the bloated version")
+ax.legend(loc="lower right", ncol=4)
+panel(ax, "stacked: what the bloated lines are; dot: the lean version's code")
+finish(fig, "s2_composition", f"Comments and docstrings are {prose_b / nonblank_b:.0%} of the bloated lines",
+       "a naive line count would double-charge prose; the meter counts code, and prose separately")
+
+#%% md
+**Reading FIG 2 (s2_composition).** Each bar is one bloated specimen split by what its lines actually are; the blue dot is how much code the lean version needed. The clamp specimen is almost entirely prose, the notifier mixes structure and docstrings, and the factory is mostly structure. Counting these separately matters later: an agent that writes an essay in a docstring and an agent that writes an extra class are both over-building, but in different ways, and only one of them is caught by a judge reading the code.
+
+#%% md
+## S3 - Ten detectors for the ten shapes
+
+**Theory.** Line counts tell us *how much* was added, not *what kind* of thing. Each shape from the front matter leaves a recognisable footprint in the syntax tree: an abstract class with exactly one subclass, a registry with exactly one entry, a function parameter that is never read, a loop that retries a call which cannot fail transiently. Each detector below is a small function over `ast`, kept deliberately simple. The test that matters is the matrix after them: every bloated specimen must trip the detector for its own shape, and the lean versions must trip **none**. A detector that fires on the lean code is worse than no detector, because it teaches the agent to delete the wrong thing.
+
+**In plain terms.** Ten small pattern checks, one per kind of bloat, each proven on the specimens before we use it.
+
+#%% md
+**`IO_CALLS`** lists the names of calls that reach outside the program: files, sockets, HTTP, subprocesses, databases, and `sleep`. Two detectors need it, because a retry only makes sense around something in this set, and so does a thread pool. Matching goes by the called name alone, so `requests.get` and `cache.get` both count as I/O. For these two detectors that is the safe mistake: it silences an alarm rather than raising a false one.
+
+#%% code
+IO_CALLS = {"open", "urlopen", "request", "get", "post", "put", "connect", "send", "recv", "sendall",
+            "run", "Popen", "check_output", "call", "read", "write", "execute", "fetch", "sleep"}
+print(f"[detectors] {len(IO_CALLS)} call names count as I/O")
+
+#%% md
+**`_calls(node)`** collects the name of everything called anywhere inside a piece of syntax tree. `f()` gives `f`, and `x.f()` gives `f` too, whatever `x` is; a call with no name to give, such as `handlers[0]()`, adds an empty string.
+
+#%% code
+def _calls(node):
+    """Names of everything called inside a node (f() and x.f() both give 'f')."""
+    out = set()                                  # each name once, however often it is called
+    for n in ast.walk(node):
+        if isinstance(n, ast.Call):
+            f = n.func                               # what is being called: a name, an attribute, or anything else
+            if isinstance(f, ast.Name):          # f()
+                out.add(f.id)
+            elif isinstance(f, ast.Attribute):   # x.f(): the method's name, whatever x is
+                out.add(f.attr)
+            else:                                # handlers[0]() or (lambda: 1)(): nothing to name
+                out.add("")
+    return out
+
+show_def(_calls)
+
+#%% code
+print(f"[_calls] {sorted(_calls(ast.parse('data = json.loads(open(path).read())')))}")
+
+#%% md
+**`_base_names(cls)`** returns the names of a class's bases, whether written plainly (`ABC`) or through a module (`abc.ABC`). A base written as a subscript or a call, such as `Generic[T]`, has no simple name and contributes an empty string.
+
+#%% code
+def _base_names(cls):
+    names = set()
+    for b in cls.bases:                          # the classes listed in the brackets of the class statement
+        if isinstance(b, ast.Name):              # class C(Base)
+            names.add(b.id)
+        elif isinstance(b, ast.Attribute):       # class C(abc.ABC)
+            names.add(b.attr)
+        else:                                    # class C(Generic[T]): no simple name
+            names.add("")
+    return names
+
+show_def(_base_names)
+
+#%% code
+store_class = ast.parse("class Store(abc.ABC, Base, Generic[T]):\n    pass\n").body[0]
+print(f"[_base_names] {sorted(_base_names(store_class))}")
+
+#%% md
+**`_is_abstract(cls)`** recognises a class written to be subclassed rather than used. Three signs count: it inherits from `ABC` or `Protocol`, one of its methods carries `@abstractmethod`, or one of its methods raises `NotImplementedError` directly in its body, which is how an abstract method looks when it is written without the `abc` module.
+
+#%% code
+def _is_abstract(cls):
+    if _base_names(cls) & {"ABC", "Protocol"}:         # declared abstract by its base
+        return True
+    for f in cls.body:                                 # the class's own statements, methods among them
+        if not isinstance(f, (ast.FunctionDef, ast.AsyncFunctionDef)):   # attributes and nested classes say nothing
+            continue
+        decos = set()                                  # the names of the method's decorators
+        for d in f.decorator_list:
+            # @abstractmethod and @abc.abstractmethod give the same name; a decorator call gives ""
+            decos.add(d.id if isinstance(d, ast.Name) else getattr(d, "attr", ""))
+        if "abstractmethod" in decos:
+            return True
+        # the other way to write an abstract method: raise NotImplementedError in its body
+        if any(isinstance(s, ast.Raise) and "NotImplementedError" in ast.unparse(s) for s in f.body):
+            return True
+    return False
+
+show_def(_is_abstract)
+
+#%% code
+for node in ast.walk(ast.parse(SPECIMENS[0]["bloated"])):     # the classes of the bloated notifier
+    if isinstance(node, ast.ClassDef):
+        print(f"  {node.name:<14} abstract: {_is_abstract(node)}")
+
+#%% md
+**`d_interface(tree)`**, shape 1: an abstract class with exactly one subclass in the same code. With one implementation there is nothing to choose between, so the abstraction is only a second name for the one real class; with two or more it is a real interface and the detector stays quiet. Like every detector below, it returns a list of `(line, note)` pairs, empty when the code is clean.
+
+#%% code
+def d_interface(tree):
+    classes = [n for n in ast.walk(tree) if isinstance(n, ast.ClassDef)]   # every class, nested ones included
+    hits = []                                                           # (line, note) for each finding
+    for c in classes:
+        if _is_abstract(c):                                             # only an abstract class can be an interface
+            subs = [k for k in classes if c.name in _base_names(k)]     # the classes that name c as a base
+            if len(subs) == 1:                                          # exactly one: nothing to abstract over
+                hits.append((c.lineno, f"abstract {c.name} has one implementation ({subs[0].name})"))
+    return hits
+
+show_def(d_interface)
+
+#%% code
+print("  bloated:", d_interface(ast.parse(SPECIMENS[0]["bloated"])))
+print("  lean   :", d_interface(ast.parse(SPECIMENS[0]["lean"])))
+
+#%% md
+**`d_factory(tree)`**, shape 2: a class or function with "factory" in its name, or a registry with a single entry, meaning a one-key dict literal assigned to a name that contains "registry". The name test is blunt, and that is fine: code that builds a factory almost always calls it one.
+
+#%% code
+def d_factory(tree):
+    hits = []
+    for n in ast.walk(tree):                     # classes, functions and assignments are all of interest
+        # named after the pattern: ParserFactory, make_factory and the like
+        if isinstance(n, (ast.ClassDef, ast.FunctionDef)) and "factory" in n.name.lower():
+            hits.append((n.lineno, f"{n.name}: a factory"))
+        # a dict literal with one key, assigned to something called a registry
+        one_entry = isinstance(n, ast.Assign) and isinstance(n.value, ast.Dict) and len(n.value.keys) == 1
+        if one_entry and any("registry" in ast.unparse(t).lower() for t in n.targets):   # _registry counts too
+            hits.append((n.lineno, "a registry with one entry"))
+    return hits
+
+show_def(d_factory)
+
+#%% code
+print("  bloated:", d_factory(ast.parse(SPECIMENS[1]["bloated"])))
+print("  lean   :", d_factory(ast.parse(SPECIMENS[1]["lean"])))
+
+#%% md
+**`d_config(tree)`**, shape 3: a class named like configuration (ending in `Config`, `Settings` or `Options`) that is never called by its own name with an argument anywhere in the code. A configuration nobody configures holds only its defaults, and a default is a constant. A call through `cls(...)` inside the class's own methods does not count, so a `from_env()` that nobody needs does not save it.
+
+#%% code
+def d_config(tree):
+    hits = []
+    names = set()                                                  # classes whose names say they hold settings
+    for n in ast.walk(tree):                                       # nested classes included
+        if isinstance(n, ast.ClassDef) and re.search(r"(Config|Settings|Options)$", n.name):
+            names.add(n.name)
+    for name in names:                                             # each settings class, judged on its own
+        # called by its own name with at least one argument, anywhere in the code
+        built_with_args = any(isinstance(n, ast.Call) and getattr(n.func, "id", "") == name
+                              and (n.args or n.keywords) for n in ast.walk(tree))
+        if not built_with_args:
+            hits.append((0, f"{name} is never built with a non-default value"))   # line 0: about the file as a whole
+    return hits
+
+show_def(d_config)
+
+#%% code
+print("  bloated:", d_config(ast.parse(SPECIMENS[2]["bloated"])))
+print("  lean   :", d_config(ast.parse(SPECIMENS[2]["lean"])))
+
+#%% md
+**`d_unused_param(tree)`**, shape 4: a parameter the function body never reads. A function whose body is only `pass` or `raise` is a stub or an abstract method, where the parameters are the interface itself, so it is skipped; so are `self`, `cls` and names that start with an underscore, which by convention may go unused. When the body opens with an expression it is left out of the search, which is how the docstring is set aside.
+
+#%% code
+def d_unused_param(tree):
+    hits = []
+    for f in ast.walk(tree):                               # every function and method, at any depth
+        if not isinstance(f, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        body = f.body                                      # the statements that could read a parameter
+        if f.body and isinstance(f.body[0], ast.Expr):     # the docstring, or any other opening expression
+            body = f.body[1:]
+        if not body or all(isinstance(s, (ast.Pass, ast.Raise)) for s in body):
+            continue                      # abstract or stub: parameters are the interface
+        used = set()                                       # every name the rest of the body mentions
+        for s in body:
+            for n in ast.walk(s):                          # names inside nested functions count too
+                if isinstance(n, ast.Name):
+                    used.add(n.id)
+        for a in f.args.args + f.args.kwonlyargs:          # the ordinary and keyword-only parameters
+            if a.arg in used or a.arg in ("self", "cls") or a.arg.startswith("_"):   # read, a receiver, or private
+                continue
+            hits.append((f.lineno, f"{f.name}({a.arg}) is never read"))   # one finding per unread parameter
+    return hits
+
+show_def(d_unused_param)
+
+#%% code
+print("  bloated:", d_unused_param(ast.parse(SPECIMENS[3]["bloated"])))
+print("  lean   :", d_unused_param(ast.parse(SPECIMENS[3]["lean"])))
+
+#%% md
+**`d_handrolled(tree)`**, shape 5: a loop that keeps a tally by hand, `counts[word] = counts[word] + 1` or `counts[word] += 1`, which is `collections.Counter` written out. One finding per file is enough, because the advice is the same however many such loops there are.
+
+#%% code
+def d_handrolled(tree):
+    hits = []
+    for loop in ast.walk(tree):
+        if not isinstance(loop, (ast.For, ast.While)):     # a tally is only kept inside a loop
+            continue
+        for n in ast.walk(loop):
+            if not isinstance(n, (ast.Assign, ast.AugAssign)):   # x = ... or x += ...
+                continue
+            target = n.targets[0] if isinstance(n, ast.Assign) else n.target   # the first target is enough
+            text = ast.unparse(n)                                               # the statement as source text
+            # an item of something, such as counts[word], that ends up one higher
+            if isinstance(target, ast.Subscript) and (re.search(r"\+ ?1$", text) or text.endswith("+= 1")):
+                hits.append((n.lineno, "a counting loop: collections.Counter"))   # one finding per loop
+                break
+    return hits[:1]                                                             # one finding per file
+
+show_def(d_handrolled)
+
+#%% code
+print("  bloated:", d_handrolled(ast.parse(SPECIMENS[4]["bloated"])))
+print("  lean   :", d_handrolled(ast.parse(SPECIMENS[4]["lean"])))
+
+#%% md
+**`d_wrapper(tree)`**, shape 6: a class with at least three methods besides `__init__`, every one of them a single statement that touches a private attribute of its own (`self._something`). A class like that adds names but no behaviour. The threshold of three keeps a small class with one or two forwarding helpers out of it.
+
+#%% code
+def d_wrapper(tree):
+    def delegates(f):
+        # leave out a docstring, or any constant that opens the body
+        opens_with_constant = (f.body and isinstance(f.body[0], ast.Expr)
+                               and isinstance(getattr(f.body[0], "value", None), ast.Constant))
+        body = f.body[1:] if opens_with_constant else f.body
+        return len(body) == 1 and "self._" in ast.unparse(body[0])     # one statement, about its own private attribute
+
+    hits = []
+    for c in ast.walk(tree):                     # every class, nested ones included
+        if not isinstance(c, ast.ClassDef):
+            continue
+        # the methods besides __init__, which is allowed to set things up
+        methods = [f for f in c.body if isinstance(f, ast.FunctionDef) and f.name != "__init__"]
+        if len(methods) >= 3 and all(delegates(f) for f in methods):   # three or more, and every one forwards
+            hits.append((c.lineno, f"{c.name} only forwards to its own attribute"))
+    return hits
+
+show_def(d_wrapper)
+
+#%% code
+print("  bloated:", d_wrapper(ast.parse(SPECIMENS[5]["bloated"])))
+print("  lean   :", d_wrapper(ast.parse(SPECIMENS[5]["lean"])))
+
+#%% md
+**`d_retry_local(tree)`**, shape 7: a retry loop around code that cannot fail transiently. A retry is a loop over attempts, `while` or `for ... in range(...)`, holding a `try` whose body leaves the loop on success. When nothing in that `try` body does I/O (a `sleep` between attempts does not count), the next attempt fails exactly like the last one. A loop over data with a `try` for each row is a different thing, a guard that keeps one bad row from losing the whole file, and it is left alone.
+
+#%% code
+def d_retry_local(tree):
+    """A retry is a loop over attempts (range(...) or while) whose try body exits on
+    success. A loop over DATA with a try per row is a guard against data loss, not a
+    retry, and must not be flagged."""
+    hits = []
+    for loop in ast.walk(tree):                                          # every node; most are not loops
+        # a loop over attempts: `while ...` or `for ... in range(...)`
+        over_attempts = isinstance(loop, ast.While) or (
+            isinstance(loop, ast.For) and isinstance(loop.iter, ast.Call)
+            and getattr(loop.iter.func, "id", "") == "range")
+        if not over_attempts:                                            # a loop over data is not a retry
+            continue
+        for t in ast.walk(loop):
+            if not isinstance(t, ast.Try):                               # a retry needs a try to catch the failure
+                continue
+            body = ast.Module(body=t.body, type_ignores=[])              # the try body alone, as a tree of its own
+            exits = any(isinstance(n, (ast.Return, ast.Break)) for n in ast.walk(body))   # success leaves the loop
+            # and nothing in the try body reaches outside the program (sleeping does not count)
+            if exits and not (_calls(body) & (IO_CALLS - {"sleep"})):
+                hits.append((loop.lineno, "retries code that cannot fail transiently"))   # one finding per loop
+                break
+    return hits
+
+show_def(d_retry_local)
+
+#%% code
+print("  bloated:", d_retry_local(ast.parse(SPECIMENS[6]["bloated"])))
+print("  lean   :", d_retry_local(ast.parse(SPECIMENS[6]["lean"])))
+
+#%% md
+**`d_concurrency(tree)`**, shape 8, finds two things. An `async def` that never awaits runs start to finish like an ordinary function, so `async` only makes life harder for its callers. And a thread pool, a process pool or a bare `Thread` created in code where no function does any I/O has nothing to wait on in parallel.
+
+#%% code
+def d_concurrency(tree):
+    hits = []
+    for f in ast.walk(tree):
+        # async without a single await: it runs start to finish like a plain function
+        if isinstance(f, ast.AsyncFunctionDef) and not any(isinstance(n, ast.Await) for n in ast.walk(f)):
+            hits.append((f.lineno, f"async {f.name} never awaits"))
+    pools = ("ThreadPoolExecutor", "ProcessPoolExecutor", "Thread")     # what starting concurrency looks like
+    # a pool or a thread is created somewhere, called by name or through its module
+    uses_pool = any(isinstance(n, ast.Call) and getattr(n.func, "id", getattr(n.func, "attr", "")) in pools
+                    for n in ast.walk(tree))
+    if uses_pool:
+        work = [f for f in ast.walk(tree) if isinstance(f, ast.FunctionDef)]   # every function the pool could run
+        if not any(_calls(f) & IO_CALLS for f in work):                         # and none of them waits on I/O
+            hits.append((0, "a thread pool for work that does no I/O"))   # line 0: about the file as a whole
+    return hits
+
+show_def(d_concurrency)
+
+#%% code
+print("  bloated:", d_concurrency(ast.parse(SPECIMENS[7]["bloated"])))
+print("  lean   :", d_concurrency(ast.parse(SPECIMENS[7]["lean"])))
+
+#%% md
+**`d_dependency(tree, local=frozenset())`**, shape 9: an import of a package that is neither in the standard library nor one of the project's own modules, which the caller names in `local`. Relative imports always point into the project and are skipped. This is the detector that sees what the line counts of S1 could not.
+
+#%% code
+def d_dependency(tree, local=frozenset()):
+    """Imports that are neither the standard library nor a module of the project itself."""
+    hits = []
+    for n in ast.walk(tree):                                                 # imports inside functions count too
+        if isinstance(n, ast.Import):                                        # import a, b.c
+            mods = [a.name for a in n.names]
+        elif isinstance(n, ast.ImportFrom) and n.module and n.level == 0:    # from a.b import c
+            mods = [n.module]
+        else:
+            mods = []                                                        # a relative import, or not an import at all
+        for m in mods:
+            top = m.split(".")[0]                                            # the package to install is the first part
+            if top not in sys.stdlib_module_names and top not in local:      # neither Python's own nor the project's
+                hits.append((n.lineno, f"third-party import: {top}"))
+    return hits
+
+show_def(d_dependency)
+
+#%% code
+print("  bloated:", d_dependency(ast.parse(SPECIMENS[8]["bloated"])))
+print("  lean   :", d_dependency(ast.parse(SPECIMENS[8]["lean"])))
+
+#%% md
+**`d_prose(src)`**, shape 10: a program with at least eight lines of prose (comments and docstrings) and more than twice as many of them as lines of code. It reads the source text rather than the tree, because comments do not survive parsing. The floor of eight keeps a short, well-commented function from tripping it.
+
+#%% code
+def d_prose(src):
+    labels = classify_lines(src)                     # the meter's labels, line by line
+    prose = sum(lab in ("comment", "docstring") for lab in labels)   # True counts as one
+    code = sum(lab == "code" for lab in labels)
+    if prose >= 8 and prose > 2 * code:              # plenty of prose, and over twice the code
+        return [(0, f"{prose} lines of prose for {code} of code")]
+    return []
+
+show_def(d_prose)
+
+#%% code
+print("  bloated:", d_prose(SPECIMENS[9]["bloated"]))
+print("  lean   :", d_prose(SPECIMENS[9]["lean"]))
+
+#%% md
+**`DETECTORS`** maps each shape number to its detector, in the same order as `SHAPES`. `detect` below walks it in that order, so its findings come out sorted by shape.
+
+#%% code
+DETECTORS = {1: d_interface, 2: d_factory, 3: d_config, 4: d_unused_param, 5: d_handrolled,
+             6: d_wrapper, 7: d_retry_local, 8: d_concurrency, 9: d_dependency, 10: d_prose}
+for shape_no, detector in DETECTORS.items():
+    print(f"  {shape_no:>2}  {SHAPES[shape_no]:<24} {detector.__name__}")
+
+#%% md
+**`detect(src, local=frozenset())`** runs all ten detectors over one source and returns every finding as `(shape, line, note)`. Most detectors read the syntax tree; `d_prose` reads the text, and `d_dependency` also needs the names of the project's own modules. Code that does not parse comes back as a syntax error under shape 0 rather than being scored clean, so handing in something broken can never look like lean code.
+
+#%% code
+def detect(src, local=frozenset()):
+    """Every shape the syntax tree shows, as (shape, line, note). `local` names the
+    project's own modules so importing them is not mistaken for a dependency.
+    Unparseable code is reported as such rather than silently scored clean."""
+    try:
+        tree = ast.parse(src)                    # parsed once, shared by every detector that reads the tree
+    except SyntaxError as e:                     # shape 0: not a shape, a warning that nothing could be checked
+        return [(0, e.lineno or 0, f"syntax error: {e.msg}")]
+    found = []
+    for shape, fn in DETECTORS.items():          # in shape order, so the findings come out sorted by shape
+        if fn is d_prose:
+            hits = fn(src)                       # prose is a property of the text, not the tree
+        elif fn is d_dependency:
+            hits = fn(tree, local)               # needs to know which modules are the project's own
+        else:
+            hits = fn(tree)
+        for line, note in hits:
+            found.append((shape, line, note))    # each finding tagged with the shape it shows
+    return found
+
+show_def(detect)
+
+#%% md
+The bloated row parser through all ten detectors at once:
+
+#%% code
+for shape, line, note in detect(SPECIMENS[1]["bloated"]):
+    print(f"  shape {shape:>2} ({SHAPES[shape]:<22}) line {line:>3}: {note}")
+
+#%% md
+**The test that matters.** Every specimen, both versions, through all ten detectors. Each bloated specimen must trip the detector for its own shape, and no lean version may trip any detector at all.
+
+#%% code
+matrix_b = np.zeros((len(SPECIMENS), len(DETECTORS)), dtype=int)   # hits per specimen (row) and detector (column)
+matrix_l = np.zeros_like(matrix_b)                                 # the same grid for the lean versions
+for i, s in enumerate(SPECIMENS):
+    for shape, _, _ in detect(s["bloated"]):
+        matrix_b[i, shape - 1] += 1                                # shapes count from 1, columns from 0
+    for shape, _, _ in detect(s["lean"]):
+        matrix_l[i, shape - 1] += 1                                # every count here is a false alarm
+# a specimen caught by its own detector, counted once however many times it fired
+own_hits = sum(matrix_b[i, s["shape"] - 1] > 0 for i, s in enumerate(SPECIMENS))
+false_alarms = int(matrix_l.sum())                                 # any finding on lean code is a false alarm
+# findings on bloated code from detectors other than the specimen's own
+cross = int(matrix_b.sum() - sum(matrix_b[i, s["shape"] - 1] for i, s in enumerate(SPECIMENS)))
+print(f"[detectors] {int(matrix_b.sum())} findings on the bloated versions, {false_alarms} on the lean ones")
+
+#%% code
+rows = []                                                          # one row per specimen, for the table
+for i, s in enumerate(SPECIMENS):
+    own_col = s["shape"] - 1                                       # the column of this specimen's own detector
+    rows.append({"specimen": s["name"], "own shape": SHAPES[s["shape"]],
+                 "fired": "yes" if matrix_b[i, own_col] else "NO",
+                 "other shapes": int(matrix_b[i].sum() - matrix_b[i, own_col]),   # second shapes in the same code
+                 "on lean": int(matrix_l[i].sum())})
+# did the own detector fire, what else fired, and how many alarms the lean version raised
+table(rows, [("specimen", "specimen", ""), ("own shape", "own shape", ""), ("fired", "own detector", ""),
+             ("other shapes", "other detectors", "d"), ("on lean", "alarms on lean", "d")])
+print(f"\n  recall on own shape : {own_hits}/{len(SPECIMENS)}")
+print(f"  false alarms on lean: {false_alarms}")
+print(f"  extra shapes found in bloated code: {cross} (bloated code is often bloated in more than one way)")
+# every specimen caught and no lean version flagged, or the notebook stops here
+assert own_hits == len(SPECIMENS) and false_alarms == 0, "a detector is not ready to be trusted"
+print("  -> every detector PASSED: it fires on its own shape and never on the lean versions")
+
+#%% md
+McCabe complexity goes into the same record, as a second view of the specimens next to the line counts.
+
+#%% code
+# McCabe complexity of both versions of every specimen
+mc = [{"specimen": s["name"], "bloated": complexity(s["bloated"]), "lean": complexity(s["lean"])} for s in SPECIMENS]
+print(f"  McCabe complexity, summed: bloated {sum(r['bloated'] for r in mc)}, lean {sum(r['lean'] for r in mc)}")
+save_exp("detectors", {"recall": own_hits / len(SPECIMENS), "false_alarms": false_alarms, "cross": cross,
+                       "complexity_bloated": sum(r["bloated"] for r in mc),
+                       "complexity_lean": sum(r["lean"] for r in mc)})
+
+#%% code
+# FIG  the detector matrix
+# a wide panel for the matrix, a narrow one for the alarms on lean code
+fig, axes = plt.subplots(1, 2, figsize=(11, 4.0), gridspec_kw={"width_ratios": [10, 1.4]})
+ax = axes[0]
+# colours capped at 3, so one busy cell does not wash out the rest
+ax.imshow(np.minimum(matrix_b, 3), cmap="Blues", vmin=0, vmax=3, aspect="auto")
+for i in range(matrix_b.shape[0]):
+    for j in range(matrix_b.shape[1]):
+        if matrix_b[i, j]:                                         # empty cells stay unlabelled
+            own = j == SPECIMENS[i]["shape"] - 1                   # the specimen's own shape is written in bold
+            ax.text(j, i, matrix_b[i, j], ha="center", va="center", fontsize=8,
+                    color="white" if matrix_b[i, j] >= 2 else INK, weight="bold" if own else "normal")
+ax.set_xticks(range(10), [SHAPES[k] for k in range(1, 11)], rotation=35, ha="right", fontsize=7.5)   # detectors
+ax.set_yticks(range(len(SPECIMENS)), [s["name"] for s in SPECIMENS])                                   # specimens
+ax.grid(False)                                       # a grid would cut through the cells
+panel(ax, "bloated specimens (rows) x detectors (columns); bold = its own shape")
+ax2 = axes[1]
+# one column: the number of alarms on each lean version, in red
+ax2.imshow(matrix_l.sum(axis=1, keepdims=True), cmap="Reds", vmin=0, vmax=3, aspect="auto")
+for i in range(len(SPECIMENS)):
+    ax2.text(0, i, int(matrix_l[i].sum()), ha="center", va="center", fontsize=8)   # the count, zero included
+ax2.set_xticks([0], ["lean"])
+ax2.set_yticks([])                                   # the rows are already named on the left
+ax2.grid(False)
+panel(ax2, "alarms")
+finish(fig, "s3_detectors", f"Each shape trips its own detector ({own_hits}/10), the lean code trips none",
+       f"{cross} extra hits on bloated code are real second shapes, not noise")
+
+#%% md
+**Reading FIG 3 (s3_detectors).** Rows are the bloated specimens, columns the ten detectors, and the bold number in each row sits on the specimen's own shape. The diagonal is complete, and the narrow column on the right (alarms on the lean versions) is empty, which is the property that makes these detectors safe to show to an agent. The off-diagonal hits are worth reading too: {{exp:detectors.cross}} of them, each a second real shape inside a specimen that was written to show one. Bloat travels in groups.
+
+#%% md
+### S3b - The golf detector: short is not the goal
+
+**Theory.** Any system that rewards fewer lines invites Goodhart's law: once a measure becomes a target, it stops measuring what it used to. The cheapest way to "write less code" is to stop writing readable code, joining statements with semicolons, assigning lambdas, nesting comprehensions and naming everything with one letter. That is not proportional code, it is the same complexity compressed into fewer, worse lines. This detector exists so that Part VII can show the full system shrinks code **without** golfing it, and so that a control arm told to "prefer one-liners" can be caught when it does.
+
+**In plain terms.** If the code got shorter by becoming unreadable, we want to know.
+
+#%% md
+**`golf_score(src)`** counts the signs of code made short rather than simple: statements joined with semicolons, lambdas assigned to names, walrus assignments, lines over 100 characters, one-letter names (apart from the usual `i`, `j`, `k`, `x`, `y`, `n` and `_`), comprehensions nested inside comprehensions, chained conditional expressions, list comprehensions run only for their side effects, and calls to `__import__`. Each sign has a weight, from one for a long line to three for a hidden `__import__`, the first one-letter name is free, and the score is the weighted sum. Readable code scores 0 or 1; code that does not parse gets no score at all.
+
+#%% code
+def golf_score(src):
+    """Signs that code was made short, not simple. Higher is worse; readable code scores 0 or 1."""
+    try:
+        tree = ast.parse(src)
+        toks = list(tokenize.generate_tokens(io.StringIO(src).readline))
+    except (SyntaxError, tokenize.TokenError, IndentationError):   # no tree, no score
+        return {"score": None}
+    nodes = list(ast.walk(tree))                     # every node once; each sign below filters this list
+    comps = (ast.ListComp, ast.GeneratorExp, ast.SetComp, ast.DictComp)            # every kind of comprehension
+    semis = sum(1 for t in toks if t.type == tokenize.OP and t.string == ";")       # a; b on one line
+    # f = lambda ...: a function written as an assignment
+    lambdas = sum(1 for n in nodes if isinstance(n, ast.Assign) and isinstance(n.value, ast.Lambda))
+    walrus = sum(1 for n in nodes if isinstance(n, ast.NamedExpr))                   # (x := ...)
+    long_lines = sum(1 for ln in src.splitlines() if len(ln) > 100)                  # too long to read at once
+    # every name the code assigns, and every positional parameter
+    names = {n.id for n in nodes if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Store)}
+    names |= {a.arg for n in nodes if isinstance(n, ast.arguments) for a in n.args}
+    one_letter = sum(1 for n in names if len(n) == 1 and n not in "ijkxyn_")        # outside the usual few
+    # a comprehension with another comprehension anywhere inside it
+    nested = sum(1 for n in nodes if isinstance(n, comps)
+                 and any(isinstance(m, comps) for m in ast.walk(n) if m is not n))
+    # a if p else b if q else c
+    chained = sum(1 for n in nodes if isinstance(n, ast.IfExp) and isinstance(n.orelse, ast.IfExp))
+    # [print(x) for x in xs] written as a statement: a loop dressed up as a list
+    side_effect_comp = sum(1 for n in nodes if isinstance(n, ast.Expr)
+                           and isinstance(n.value, ast.ListComp))
+    dunder_import = src.count("__import__(")                                         # an import hidden in an expression
+    # every count by name, so a reader can see why a score is high
+    parts = {"semicolons": semis, "lambdas": lambdas, "walrus": walrus, "long lines": long_lines,
+             "one-letter names": one_letter, "nested comprehensions": nested, "chained ternaries": chained,
+             "comprehension for side effects": side_effect_comp, "__import__": dunder_import}
+    # the weighted sum; the first one-letter name is free
+    parts["score"] = (2 * semis + 2 * lambdas + walrus + long_lines + max(0, one_letter - 1)
+                      + nested + 2 * chained + 3 * side_effect_comp + 3 * dunder_import)
+    return parts
+
+show_def(golf_score)
+
+#%% code
+squeezed = "def f(a):\n    [print(b) for b in a]; return 1\n"   # a semicolon, a list run for its prints, one-letter names
+print(f"[golf_score] {dict((k, v) for k, v in golf_score(squeezed).items() if v)}")
+
+#%% md
+**`GOLFED`** holds four of the lean programs squeezed further, the way a model told to minimise lines might write them. Three of them still behave exactly like the lean version. One does not, and the comparison below catches it.
+
+#%% code
+GOLFED = {
+    "top words": "top_words=lambda t,n=3:__import__('collections').Counter(w for w in(x.strip('.,;:!?')for x in t.lower().split())if w).most_common(n)\n",
+    "session store": "def run_session(o):\n s={};r=[];[s.__setitem__(k,v)if p=='set'else r.append(s.get(k))if p=='get'else s.pop(k,None)for p,k,v in o];return r\n",
+    "port parser": "parse_port=lambda v:int(str(v).strip())\n",
+    "vat": "gross=lambda n:round(n*1.2,2)\n",
+}
+print(f"[golf] {len(GOLFED)} golfed programs: {', '.join(GOLFED)}")
+
+#%% md
+Each golfed program runs against the lean one on the specimen's inputs, and then all three versions are measured: code lines with the meter, readability with the golf score.
+
+#%% code
+golf_rows = []                                                        # one row per golfed specimen
+for s in SPECIMENS:
+    if s["name"] not in GOLFED:                                       # only four specimens were golfed
+        continue
+    g = GOLFED[s["name"]]                                             # the golfed program text
+    fl = load_fn(s["lean"], s["entry"])                               # the lean entry function
+    fg = load_fn(g, s["entry"])                                       # and the golfed one
+    same = all(outcome(fl, a) == outcome(fg, a) for a in s["calls"])  # does the golfed version still behave?
+    # code lines of all three versions, the golf score of two, and the behaviour verdict
+    golf_rows.append({"specimen": s["name"], "bloated": measure_source(s["bloated"])["code"],
+                      "lean": measure_source(s["lean"])["code"], "golfed": measure_source(g)["code"],
+                      "lean score": golf_score(s["lean"])["score"], "golfed score": golf_score(g)["score"],
+                      "same": "PASSED" if same else "FAILED"})
+table(golf_rows, [("specimen", "specimen", ""), ("bloated", "bloated", "d"), ("lean", "lean", "d"),
+                  ("golfed", "golfed", "d"), ("lean score", "golf score lean", "d"),
+                  ("golfed score", "golf score golfed", "d"), ("same", "same as lean", "")])
+
+#%% code
+broken = [r["specimen"] for r in golf_rows if r["same"] == "FAILED"]  # golfed programs that changed behaviour
+print(f"\n  golfed versions that changed behaviour: {broken or 'none'}")
+print("  -> the golfed port parser lost its negative-port check: shortening hid a dropped guard")
+lean_total = sum(r["lean"] for r in golf_rows)                      # code lines of the four lean programs
+golf_total = sum(r["golfed"] for r in golf_rows)                    # and of their golfed versions
+save_exp("golf", {"rows": golf_rows, "broken": broken, "shorter_pct": 1 - golf_total / lean_total})
+
+#%% code
+# FIG  short versus simple
+fig, ax = plt.subplots(figsize=(8.5, 3.4))
+# one series per version: code lines across, golf score up
+for key, colour, label in (("bloated", C8, "bloated"), ("lean", C1, "lean"), ("golfed", C4, "golfed")):
+    xs = [r[key] for r in golf_rows]                                 # code lines of this version
+    ys = []                                                          # and its golf score
+    for r in golf_rows:
+        if key != "golfed":
+            # the bloated or lean program of this specimen, looked up by name
+            version_src = next(s[key] for s in SPECIMENS if s["name"] == r["specimen"])
+        else:
+            version_src = GOLFED[r["specimen"]]
+        ys.append(golf_score(version_src)["score"])
+    ax.scatter(xs, ys, s=60, color=colour, label=label, zorder=3)     # drawn above the grid
+    for x, y_, r in zip(xs, ys, golf_rows):                          # each point labelled with its specimen
+        ax.annotate(r["specimen"], (x, y_), textcoords="offset points", xytext=(5, 4), fontsize=7, color=INK2)
+ax.set_xlabel("code lines")
+ax.set_ylabel("golf score (higher = harder to read)")
+ax.legend(loc="upper right")
+panel(ax, "lean code is short AND scores zero; golfed code is shorter and scores high")
+finish(fig, "s3b_golf", f"Golfing saves {1 - golf_total / lean_total:.0%} more lines and broke {len(broken)} of {len(golf_rows)} programs",
+       "the goal is code the task needs, not the fewest characters; the golf score keeps the two apart")
+
+#%% md
+**Reading FIG 4 (s3b_golf).** Lean code (blue) sits low on both axes: short and readable. Golfed code (yellow) is shorter still and sits high on the golf score, and one of the four golfed programs quietly lost the check that rejects a negative port. That is the failure this detector is here to catch: when a model is pushed towards fewer lines without a counterweight, the lines it removes first are often the ones that guard against bad input.
+
+#%% md
+### S3c - Guard signatures: what must never be cut
+
+**Theory.** The system's central promise is asymmetric: cut structure freely, never cut a guard. To hold an agent to that, a guard has to be recognisable in code. Most guards have a signature: a containment check before using a user-supplied path (`commonpath`, `is_relative_to`), a placeholder in an SQL statement with the value passed separately, a constant-time comparison for a signature (`hmac.compare_digest`), escaping before text becomes HTML, a type check on parsed JSON, a `try` around a single row so one bad row cannot lose the whole file, a refusal of newline characters in anything that becomes a header. The detector below counts them. It is used twice later: the critic's trim guard (S50) refuses any deletion that lowers the count, and the controls in S65 compare the counts between arms.
+
+**In plain terms.** We teach the system to recognise the lines that protect the program, so it can be stopped from deleting them.
+
+#%% md
+**`GUARD_PATTERNS`** is the table of textual guard signatures, one regular expression per kind of guard. They are loose on purpose. A detector that misses a guard lets a trim delete it; one that sees a guard where there is none only keeps a line that could have gone, which is the cheaper mistake.
+
+#%% code
+GUARD_PATTERNS = {
+    # a user-supplied path checked to stay inside its folder
+    "path containment":     r"commonpath|is_relative_to|relative_to\(|realpath\(.*startswith",
+    # SQL with a placeholder (?, %s or :name) and the values passed separately
+    "placeholder query":    r"execute\(\s*[\"'][^\"']*(\?|%s|:\w+)[^\"']*[\"']\s*,",
+    "constant-time compare": r"compare_digest",                       # hmac's comparison for secrets
+    "html escaping":        r"html\.escape|escape\(",
+    # parsed input checked for the type the code expects
+    "type check on input":  r"isinstance\(\s*\w+\s*,\s*\(?\s*(dict|list|str|int|float|bool)",
+    "explicit rejection":   r"raise\s+(ValueError|PermissionError|TypeError|KeyError|LookupError)",
+    # a carriage return or line feed refused before text goes into a header
+    "newline rejection":    r"\\r|\\n\"?\s*in\s|splitlines\(\)\s*!=|\[\\r\\n\]",
+    "anchored match":       r"fullmatch\(|\\Z",                        # a pattern that must match the whole input
+    # a timestamp compared with an expiry, or with the clock
+    "expiry check":         r"(expires?|expiry|exp)\w*\s*[<>]=?|time\.time\(\)\s*[<>]",
+    "alt text":             r"\balt\s*=",                              # an image described for readers who cannot see it
+}
+print(f"[guards] {len(GUARD_PATTERNS)} textual signatures, plus one read from the syntax tree")
+
+#%% md
+**`guard_signatures(src)`** counts the guards in a program: each textual signature, plus one structural signature read from the syntax tree, a `try` inside a loop, which is how one bad row is kept from losing a whole file. A `try` under two nested loops counts once for each loop. Only the kinds actually found are returned, so an empty dict means no guard was recognised.
+
+#%% code
+def guard_signatures(src):
+    """Count recognisable guards. Per-row error handling (a try inside a loop) is read
+    from the syntax tree; the rest are textual signatures."""
+    found = Counter()                                      # kind of guard, then how many times it appears
+    for name, p in GUARD_PATTERNS.items():
+        found[name] = len(re.findall(p, src))              # every match anywhere in the source
+    try:
+        tree = ast.parse(src)
+        per_row = 0                                        # try statements inside loops
+        for loop in ast.walk(tree):
+            if isinstance(loop, (ast.For, ast.While)):
+                # every try anywhere under this loop; a loop inside a loop counts it again
+                per_row += sum(1 for n in ast.walk(loop) if isinstance(n, ast.Try))
+        found["per-row error handling"] = per_row          # zero is dropped below, like any other kind
+    except SyntaxError:
+        pass                                               # unparseable: the textual signatures still stand
+    return {k: v for k, v in found.items() if v}           # only the kinds actually present
+
+show_def(guard_signatures)
+
+#%% md
+**`GUARD_PAIRS`** holds five small functions written twice: once with the guard a careful reviewer would insist on, once without it. Each lazy version is shorter, works on friendly input and fails on hostile input. The detector has to tell every pair apart.
+
+**Path join.** The safe version resolves both paths and refuses a name that climbs out of the upload folder, such as `../../etc/passwd`. The lazy one joins whatever it is given.
+
+#%% code
+GUARD_PAIRS = {}   # pair name, then (safe version, lazy version)
+GUARD_PAIRS["path join"] = ("""
+import os
+def upload_path(base, name):
+    base = os.path.abspath(base)
+    target = os.path.abspath(os.path.join(base, name))
+    if os.path.commonpath([base, target]) != base:
+        raise ValueError("outside the upload folder")
+    return target
+""", """
+import os
+def upload_path(base, name):
+    return os.path.join(base, name)
+""")
+safe, lazy = GUARD_PAIRS["path join"]                  # the two versions, counted separately
+print(f"  safe: {guard_signatures(safe)}\n  lazy: {guard_signatures(lazy)}")
+
+#%% md
+**SQL lookup.** The safe version passes the name as a parameter, so the database never reads it as SQL. The lazy one pastes it into the statement, where a name such as `x' OR '1'='1` changes what the query does.
+
+#%% code
+GUARD_PAIRS["sql lookup"] = ("""
+def find(conn, name):
+    return conn.execute("SELECT * FROM users WHERE name = ?", (name,)).fetchone()
+""", """
+def find(conn, name):
+    return conn.execute(f"SELECT * FROM users WHERE name = '{name}'").fetchone()
+""")
+safe, lazy = GUARD_PAIRS["sql lookup"]                  # the two versions, counted separately
+print(f"  safe: {guard_signatures(safe)}\n  lazy: {guard_signatures(lazy)}")
+
+#%% md
+**Token check.** The safe version recomputes the token's signature with the secret and compares the two in constant time, so the time the comparison takes reveals nothing about the right answer. The lazy one returns whatever user id comes before the dot, signed or not.
+
+#%% code
+GUARD_PAIRS["token check"] = ("""
+import hmac, hashlib
+def verify(token, secret):
+    uid, _, sig = token.rpartition(".")
+    good = hmac.new(secret.encode(), uid.encode(), hashlib.sha256).hexdigest()
+    return uid if hmac.compare_digest(sig, good) else None
+""", """
+def verify(token, secret):
+    return token.split(".")[0]
+""")
+safe, lazy = GUARD_PAIRS["token check"]                  # the two versions, counted separately
+print(f"  safe: {guard_signatures(safe)}\n  lazy: {guard_signatures(lazy)}")
+
+#%% md
+**CSV total.** The safe version skips a row it cannot read and carries on adding up the rest. The lazy one is a single `sum`, so one blank or malformed amount loses the whole file to an exception.
+
+#%% code
+GUARD_PAIRS["csv total"] = ("""
+import csv
+def total(path):
+    out = 0.0
+    with open(path, newline="") as f:
+        for row in csv.DictReader(f):
+            try:
+                out += float(row["amount"])
+            except (ValueError, KeyError):
+                continue
+    return out
+""", """
+import csv
+def total(path):
+    with open(path, newline="") as f:
+        return sum(float(r["amount"]) for r in csv.DictReader(f))
+""")
+safe, lazy = GUARD_PAIRS["csv total"]                  # the two versions, counted separately
+print(f"  safe: {guard_signatures(safe)}\n  lazy: {guard_signatures(lazy)}")
+
+#%% md
+**Caption into HTML.** The safe version escapes both values before they become markup and gives the image its alt text. The lazy one inserts them raw, so a caption that contains a `<script>` tag runs as a script.
+
+#%% code
+GUARD_PAIRS["caption html"] = ("""
+import html
+def figure(src, caption):
+    return f'<img src="{html.escape(src)}" alt="{html.escape(caption)}"><p>{html.escape(caption)}</p>'
+""", """
+def figure(src, caption):
+    return f'<img src="{src}"><p>{caption}</p>'
+""")
+safe, lazy = GUARD_PAIRS["caption html"]                  # the two versions, counted separately
+print(f"  safe: {guard_signatures(safe)}\n  lazy: {guard_signatures(lazy)}")
+
+#%% md
+The five pairs side by side: code lines and guards for each version, and what the safe version guards with.
+
+#%% code
+rows = []                                            # one row per pair
+for name, (safe, lazy) in GUARD_PAIRS.items():
+    gs = guard_signatures(safe)                      # guards found in the safe version
+    gl = guard_signatures(lazy)                      # and in the lazy one
+    # guards and code lines of both versions, and the kinds of guard the safe one uses
+    rows.append({"pair": name, "safe": sum(gs.values()), "lazy": sum(gl.values()),
+                 "lines safe": measure_source(safe)["code"], "lines lazy": measure_source(lazy)["code"],
+                 "guards": ", ".join(sorted(gs)) or "-"})
+table(rows, [("pair", "pair", ""), ("lines safe", "lines safe", "d"), ("lines lazy", "lines lazy", "d"),
+             ("safe", "guards safe", "d"), ("lazy", "guards lazy", "d"), ("guards", "what the safe version guards with", "")])
+missed = [r["pair"] for r in rows if r["safe"] <= r["lazy"]]   # pairs the detector could not tell apart
+print(f"\n  pairs where the safe version did NOT show more guards: {missed or 'none'}")
+print(f"  the safe versions are {sum(r['lines safe'] for r in rows) - sum(r['lines lazy'] for r in rows)} lines longer in total:")
+print("  -> those lines are exactly the ones a size-only objective would delete first")
+save_exp("guards", {"rows": rows, "missed": missed})
+
+#%% md
+The extra lines in the safe versions are small (one to four per function) and they are what a pure size objective removes first. That is the asymmetry the system has to respect, and the reason guard signatures exist as a separate instrument rather than as a judgement left to the model.
+
+#%% md
+### S3d - A replacement table that tests itself
+
+**Theory.** The cheapest rungs of the ladder (the standard library, the platform) only help if the agent knows what is there, and a table of "instead of X, use Y" is the usual way to teach it. Such tables are easy to write and easy to get wrong: "use the dict union operator to merge configs" is right for flat dicts and silently wrong for nested ones; "use `email.utils.parseaddr` to validate an address" confuses a parser with a validator. A replacement that is wrong is worse than none, because an agent that trusts it will ship the bug with confidence. So every row below carries a test that runs the claim, and two rows are deliberately wrong to show the tests catching them.
+
+**In plain terms.** A cheat sheet of "the standard library already does this", where every line is checked by running it.
+
+#%% md
+The rows test their claims against these modules, all from the standard library. `hmac` and `html` come in under the private names `_hmac` and `_html`, so Part I does not take the plain names.
+
+#%% code
+import collections            # the counting row
+import copy                   # deepcopy
+import functools              # cache
+import itertools              # batched, new in Python 3.12
+import decimal                # Decimal, for money
+import zoneinfo               # time zones with their daylight-saving rules
+import datetime as dt         # dates and times, under a short name
+import ipaddress              # strict IPv4 parsing
+import hmac as _hmac          # compare_digest
+import html as _html          # escape
+import sqlite3                # an in-memory database for the UNIQUE row
+import email.utils            # parseaddr, for a row planted wrong
+
+print(f"[replacements] python {sys.version_info.major}.{sys.version_info.minor}; "
+      f"itertools.batched {'available' if hasattr(itertools, 'batched') else 'missing'}")
+
+#%% md
+**`replacement(need, instead, use, holds_when, claim_ok=True)`** registers one row of the table, and is used as a decorator: the function under it is the row's test, which runs the claim and returns `(passed, evidence)`. `holds_when` states the condition the advice depends on, because most replacements are right only within limits. `claim_ok=False` marks the two rows planted wrong, so the table can check that the tests caught exactly those. Every test is named `_`: the row is what matters, and the name is never used.
+
+#%% code
+REPLACEMENTS = []   # every row, in the order registered
+
+def replacement(need, instead, use, holds_when, claim_ok=True):
+    """Register a row; the decorated function is its test and returns (passed, evidence)."""
+    def wrap(test):                    # receives the test function written under the decorator
+        # the claim, the condition it depends on, and the test that checks it
+        REPLACEMENTS.append({"need": need, "instead": instead, "use": use, "holds_when": holds_when,
+                             "claim_ok": claim_ok, "test": test})
+        return test
+    return wrap
+
+show_def(replacement)
+
+#%% md
+**`collections.Counter`** instead of a dict and a loop, whenever the job is counting. `most_common` does the ranking as well. The test counts six words and checks the winner.
+
+#%% code
+@replacement("count things", "a dict and a loop", "collections.Counter", "always")
+def _():
+    words = "a b a c b a".split()                        # a three times, b twice, c once
+    return Counter(words).most_common(1) == [("a", 3)], "most_common(1) == [('a', 3)]"   # the claim, then the evidence
+
+print(f"  row {len(REPLACEMENTS)}: {REPLACEMENTS[-1]['need']}")
+
+#%% md
+**`list(dict.fromkeys(xs))`** instead of a loop with a set of seen items, to drop duplicates and keep the order. A dict keeps its keys in insertion order, so each item comes out where it first appeared; the items must be hashable, because they become keys.
+
+#%% code
+@replacement("dedupe, keep order", "a seen-set loop", "list(dict.fromkeys(xs))", "items are hashable")
+def _():
+    # duplicates dropped, first appearances kept in order
+    return list(dict.fromkeys([3, 1, 3, 2, 1])) == [3, 1, 2], "[3,1,3,2,1] -> [3,1,2]"
+
+print(f"  row {len(REPLACEMENTS)}: {REPLACEMENTS[-1]['need']}")
+
+#%% md
+**`s.casefold()`** instead of `s.lower()`, to compare text regardless of case. `lower()` leaves the German ß as it is, so "Straße" and "STRASSE" do not match; `casefold()` turns ß into ss and they do. Lower case is still right for display, which is why the row says matching only.
+
+#%% code
+@replacement("case-insensitive match", "s.lower()", "s.casefold()", "matching, not display")
+def _():
+    # casefold matches the two spellings, lower does not
+    return ("Straße".casefold() == "STRASSE".casefold() and "Straße".lower() != "STRASSE".lower(),
+            "casefold matches Strasse; lower does not")
+
+print(f"  row {len(REPLACEMENTS)}: {REPLACEMENTS[-1]['need']}")
+
+#%% md
+**`functools.cache`** instead of a cache class written by hand, to remember the results of a pure function. The arguments must be hashable, since they become the cache's keys. The test calls the function twice with the same argument and checks that its body ran once.
+
+#%% code
+@replacement("memoise a pure function", "a cache class", "functools.cache", "arguments are hashable")
+def _():
+    calls = []                       # one entry per time the body really runs
+    @functools.cache                 # remembers sq(n) for every n it has seen
+    def sq(n):
+        calls.append(n)
+        return n * n
+    sq(4)
+    sq(4)                            # the second call is answered from the cache
+    return calls == [4], "body ran once for two calls"
+
+print(f"  row {len(REPLACEMENTS)}: {REPLACEMENTS[-1]['need']}")
+
+#%% md
+**`decimal.Decimal`** instead of `float`, for money. In binary floating point 0.1 + 0.2 is not 0.3, and the difference surfaces in totals and comparisons; a `Decimal` built from strings does exact decimal arithmetic.
+
+#%% code
+@replacement("money arithmetic", "float", "decimal.Decimal", "values are money")
+def _():
+    # exact with Decimal built from strings, off by a tiny amount with floats
+    return (decimal.Decimal("0.1") + decimal.Decimal("0.2") == decimal.Decimal("0.3") and 0.1 + 0.2 != 0.3,
+            "Decimal: 0.1 + 0.2 == 0.3; float: it does not")
+
+print(f"  row {len(REPLACEMENTS)}: {REPLACEMENTS[-1]['need']}")
+
+#%% md
+**`zoneinfo.ZoneInfo`** instead of a fixed offset from UTC, for local time in a zone with daylight saving. London's clocks go forward at 01:00 UTC on 29 March 2026, so 00:30 UTC is 00:30 GMT and an hour later it is 02:30 BST. A fixed offset gets one of the two wrong.
+
+#%% code
+@replacement("local time across DST", "a fixed UTC offset", "zoneinfo.ZoneInfo", "the zone has DST rules")
+def _():
+    z = zoneinfo.ZoneInfo("Europe/London")                                       # GMT in winter, BST in summer
+    a = dt.datetime(2026, 3, 29, 0, 30, tzinfo=dt.timezone.utc).astimezone(z)   # half an hour before the change
+    b = dt.datetime(2026, 3, 29, 1, 30, tzinfo=dt.timezone.utc).astimezone(z)   # half an hour after it
+    # an hour of UTC apart, two hours apart on the London clock
+    return (a.hour, b.hour) == (0, 2), f"00:30 UTC -> {a:%H:%M %Z}, 01:30 UTC -> {b:%H:%M %Z}"
+
+print(f"  row {len(REPLACEMENTS)}: {REPLACEMENTS[-1]['need']}")
+
+#%% md
+**`date.fromisoformat`** instead of a date library, when the input is ISO 8601. This is the day parser specimen turned into advice: Python has read `YYYY-MM-DD` on its own since version 3.7.
+
+#%% code
+@replacement("parse ISO dates", "a date library", "date.fromisoformat", "input is ISO 8601")
+def _():
+    return dt.date.fromisoformat("2026-03-07") == dt.date(2026, 3, 7), "2026-03-07 parsed"   # year, month, day
+
+print(f"  row {len(REPLACEMENTS)}: {REPLACEMENTS[-1]['need']}")
+
+#%% md
+**`copy.deepcopy`** instead of a recursive copy helper. The test changes a value two levels down in the copy and checks that the original did not change with it.
+
+#%% code
+@replacement("deep copy", "a recursive copy helper", "copy.deepcopy", "objects are copyable")
+def _():
+    a = {"x": [1, {"y": 2}]}         # a dict inside a list inside a dict
+    b = copy.deepcopy(a)             # copies every level, not just the outer dict
+    b["x"][1]["y"] = 9               # change the copy, two levels down
+    return a["x"][1]["y"] == 2, "nested change did not leak back"   # the original still holds 2
+
+print(f"  row {len(REPLACEMENTS)}: {REPLACEMENTS[-1]['need']}")
+
+#%% md
+**`hmac.compare_digest`** instead of `==`, when comparing secrets. `==` stops at the first difference, so the time it takes hints at how much of a guess was right; `compare_digest` takes a time that does not depend on where the inputs differ.
+
+#%% code
+@replacement("constant-time compare", "==", "hmac.compare_digest", "comparing secrets")
+def _():
+    # right on an equal pair and on an unequal one
+    return _hmac.compare_digest("abc", "abc") and not _hmac.compare_digest("abc", "abd"), "equal and unequal"
+
+print(f"  row {len(REPLACEMENTS)}: {REPLACEMENTS[-1]['need']}")
+
+#%% md
+**`html.escape`** instead of a chain of `replace()` calls, for text that goes into HTML. It escapes `&`, `<`, `>` and both kinds of quote, and it handles the ampersand first, which is the step a hand-written chain most easily gets in the wrong order.
+
+#%% code
+@replacement("escape for HTML", "manual replace() calls", "html.escape", "text goes into HTML")
+def _():
+    # angle brackets and double quotes all become entities
+    return _html.escape('<b x="1">') == "&lt;b x=&quot;1&quot;&gt;", "tags and quotes escaped"
+
+print(f"  row {len(REPLACEMENTS)}: {REPLACEMENTS[-1]['need']}")
+
+#%% md
+**`ipaddress.IPv4Address`** instead of a regular expression, to validate an IPv4 address. It is strict: it refuses an octet above 255, a leading zero (which some parsers read as octal) and a trailing newline, all of which a quick regex tends to let through. The test uses `_ok`, defined after the last row, to turn a refusal into `False`; Python looks the name up only when the test runs.
+
+#%% code
+@replacement("validate an IPv4 address", "a regex", "ipaddress.IPv4Address", "IPv4 only, strictly")
+def _():
+    def ok(s):
+        return _ok(lambda: ipaddress.IPv4Address(s))     # True when the text parses as an address
+    # one good address, then three that a loose pattern would accept
+    return (ok("10.0.0.1") and not ok("256.1.1.1") and not ok("01.2.3.4") and not ok("1.2.3.4\n"),
+            "rejects 256.x, leading zeros and a trailing newline")
+
+print(f"  row {len(REPLACEMENTS)}: {REPLACEMENTS[-1]['need']}")
+
+#%% md
+**`itertools.batched`** instead of the `zip(*[iter(xs)] * n)` idiom, to split a sequence into batches. The idiom silently drops a short last batch, and `batched` keeps it. It needs Python 3.12, which is the condition this row states.
+
+#%% code
+@replacement("split into batches", "zip(*[iter(xs)] * n)", "itertools.batched", "the project targets Python 3.12+")
+def _():
+    # seven items in threes: two full batches and a last one of a single item
+    return list(itertools.batched(range(7), 3)) == [(0, 1, 2), (3, 4, 5), (6,)], "7 items -> 3 batches, remainder kept"
+
+print(f"  row {len(REPLACEMENTS)}: {REPLACEMENTS[-1]['need']}")
+
+#%% md
+**A `UNIQUE` constraint** instead of a `SELECT` before every `INSERT`, when the data lives in a database. Checking first and then inserting can race with another writer; the constraint cannot, because the database enforces it. The test's column also ignores case, so `a@x.org` is refused as a duplicate of `A@x.org`.
+
+#%% code
+@replacement("unique rows in a table", "SELECT, then INSERT", "a UNIQUE constraint", "the data lives in a database")
+def _():
+    db = sqlite3.connect(":memory:")                     # a database that lives only for this test
+    db.execute("create table m(email text unique collate nocase)")   # unique, ignoring case
+    db.execute("insert into m values ('A@x.org')")                     # the first address goes in
+    # the same address in lower case must be refused
+    return not _ok(lambda: db.execute("insert into m values ('a@x.org')")), "the database refused the duplicate"
+
+print(f"  row {len(REPLACEMENTS)}: {REPLACEMENTS[-1]['need']}")
+
+#%% md
+**`a | b`** to merge nested configuration: planted wrong. The union operator is shallow. Merging a configuration whose `db` section has a host and a port with one that changes only the port replaces the whole `db` section, and the host is lost.
+
+#%% code
+@replacement("merge nested config", "a deep-merge helper", "a | b", "-", claim_ok=False)
+def _():
+    a, b = {"db": {"host": "h", "port": 1}}, {"db": {"port": 2}}   # b only means to change the port
+    # the claim holds only if the host survives the merge
+    return (a | b)["db"].get("host") == "h", f"a | b -> {a | b}  (host lost: | is shallow)"
+
+print(f"  row {len(REPLACEMENTS)}: {REPLACEMENTS[-1]['need']}")
+
+#%% md
+**`email.utils.parseaddr`** to validate an email address: planted wrong. `parseaddr` splits an address header into a name and an address. It is a parser, not a validator, and it hands back `@missing-local.com` without complaint.
+
+#%% code
+@replacement("validate an email address", "a regex", "email.utils.parseaddr", "-", claim_ok=False)
+def _():
+    name, addr = email.utils.parseaddr("@missing-local.com")   # no local part before the @
+    # a validator would refuse this and give back no address at all
+    return addr == "", f"parseaddr('@missing-local.com') -> {addr!r}: a parser, not a validator"
+
+print(f"  row {len(REPLACEMENTS)}: {REPLACEMENTS[-1]['need']}")
+
+#%% md
+**`_ok(fn)`** calls `fn` and says whether it finished without raising. Two of the rows above use it to turn "the parser refused this" into a plain `False`.
+
+#%% code
+def _ok(fn):
+    try:
+        fn()                             # run it; an exception lands below
+        return True
+    except Exception:                    # any exception counts as a refusal
+        return False
+
+show_def(_ok)
+
+#%% code
+print(f"[replacements] {len(REPLACEMENTS)} rows, each with its own test")
+print(f"  _ok on int('42'): {_ok(lambda: int('42'))}; on int('forty-two'): {_ok(lambda: int('forty-two'))}")
+
+#%% md
+Every row's test now runs. A row passes when its claim holds; a row whose claim fails is marked WRONG, and the only WRONG rows allowed are the two planted ones.
+
+#%% code
+rows = []                                            # one row per replacement, for the table and the record
+for r in REPLACEMENTS:
+    passed, evidence = r["test"]()                   # run the claim; evidence says what was observed
+    status = "PASSED" if passed else "WRONG"         # a claim that fails its own test is wrong advice
+    rows.append({"need": r["need"], "use": r["use"], "holds when": r["holds_when"],
+                 "test": status, "evidence": evidence})
+table(rows, [("need", "need", ""), ("use", "use", ""), ("holds when", "holds when", ""), ("test", "test", ""),
+             ("evidence", "evidence", "")])
+
+#%% code
+wrong = [r for r in rows if r["test"] == "WRONG"]                               # the rows whose test failed
+expected_wrong = [r["need"] for r in REPLACEMENTS if not r["claim_ok"]]          # the two planted rows
+print(f"\n  {len(rows) - len(wrong)} rows PASSED, {len(wrong)} rows WRONG: {[r['need'] for r in wrong]}")
+# the failures must be exactly the planted rows: no more, and no fewer
+assert sorted(r["need"] for r in wrong) == sorted(expected_wrong), "a row we trusted failed its test"
+print("  -> the two wrong rows were planted; the tests caught both. An untested table would have")
+print("     shipped them as advice. Only PASSED rows are offered to the agent (S48).")
+SAFE_REPLACEMENTS = [r for r, row in zip(REPLACEMENTS, rows) if row["test"] == "PASSED"]   # the rows S48 may offer
+save_exp("replacements", {"rows": rows, "passed": len(rows) - len(wrong), "wrong": len(wrong)})
+
+#%% md
+**Part I recap.** Every instrument the rest of the notebook depends on now exists and has passed tests built to fool it. The bloat meter counts added code without being inflated by comments, docstrings or the one self-check we will ask for. Ten detectors each recognise one shape of over-engineering and never fire on the lean versions. The golf detector separates short code from unreadable code, the guard detector recognises the lines that must survive any trim, and the replacement table refuses to keep a row whose test fails.
+
+**Try it yourself.**
+1. Add an eleventh specimen pair to S1 (a class with a single static method is a good one), re-run S1 to S3, and see whether any detector notices it. If none does, write the detector.
+2. In S3d, change the `"validate an IPv4 address"` test to accept `"01.2.3.4"`. Watch the row fail, then decide whether strict parsing really is what a ticket needs.
+3. Golf the `clamp` specimen and feed it to `golf_score`. How short can you make it before the score passes 4?

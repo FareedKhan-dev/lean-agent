@@ -1,0 +1,9 @@
+flowchart TD
+    %%STYLES%%
+    F["🧩 <b>the full system</b>"]:::plugin --> W["➖ <b>the same system<br/>without one piece</b>"]:::grey
+    W --> R["🏃 <b>the piece's own tasks</b><br/>two runs each"]:::lab
+    R --> D{"📊 <b>full minus without</b><br/>on the piece's target"}:::gold
+    D -- "interval above zero" --> K["✅ <b>KEPT</b>"]:::plugin
+    D -- "interval spans zero" --> N["⚪ <b>NEUTRAL</b> · removed"]:::grey
+    D -- "interval below zero" --> HM["❌ <b>HARMFUL</b> · removed"]:::warn
+    N -.-> X["🛡️ <b>never cut</b> is exempt:<br/>it protects a promise, not a metric"]:::gold

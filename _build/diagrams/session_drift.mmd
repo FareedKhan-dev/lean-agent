@@ -1,0 +1,14 @@
+sequenceDiagram
+    participant T as 🎫 tickets 1 to 6
+    participant H as 🖥️ host
+    participant P as 🧩 plugin
+    T->>H: ticket 1
+    P-->>H: rules (session start)
+    H->>H: budget exceeded: compact, sections dropped
+    alt compaction hook on
+        P-->>H: rules again (session_start, source compact)
+    else compaction hook off
+        Note over H: no rules for the rest of this ticket
+    end
+    T->>H: ticket 2
+    P-->>H: rules (the prompt hook sees the level is missing)

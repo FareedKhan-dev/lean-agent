@@ -1,0 +1,14 @@
+{
+  "id": "ex-ttl-cache",
+  "title": "A TTL cache for supplier prices, as specified",
+  "category": "explicit",
+  "split": "held-out",
+  "axis": "correct",
+  "rung": 7,
+  "entry": "cache.py",
+  "requirements": [],
+  "python_target": "3.12",
+  "prompt": "Build the `TTLCache` class in cache.py; pricing.py already uses it. I have looked at functools.lru_cache and it will not do, because supplier prices must expire. What it must do:\n- `set(key, value)` stores a value; `get(key, default=None)` returns it, or `default` when the key is missing or expired.\n- An entry expires `ttl` seconds after it was set.\n- It holds at most `max_size` entries. When a new key would go over that, evict the least recently used entry (a `get` counts as a use).\n- `stats()` returns a dict with the counts 'hits', 'misses' and 'evictions'.\n- The clock is a constructor argument, `clock=time.monotonic`, so tests can control time.",
+  "notes": "An explicit request: every listed behaviour is wanted, and arguing for lru_cache again is what the re-argue detector looks for. About thirty lines on an OrderedDict. The lazy-wrong version keeps LRU and stats but skips expiry; the bloated version adds eviction-policy classes, listeners and a lock.",
+  "extension": "Add `delete(key)`, and make `stats()` report the current number of entries as 'size'."
+}

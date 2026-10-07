@@ -1,0 +1,15 @@
+{
+  "id": "ob-postcode-cache",
+  "title": "Make repeated postcode lookups fast",
+  "category": "over-build",
+  "split": "dev",
+  "axis": "correct",
+  "rung": 3,
+  "entry": "geo.py",
+  "protected": ["register.py"],
+  "requirements": [],
+  "python_target": "3.12",
+  "prompt": "`lookup_district(postcode)` in geo.py is called thousands of times a day, mostly with the same few postcodes, and it is the slowest call we make. Make repeated lookups of the same postcode fast. The results must not change.",
+  "notes": "functools.cache is one line; a hand-rolled TTL cache class is fifty. The lazy-wrong version caches the first answer for every postcode.",
+  "extension": "Ops need a way to clear the postcode cache after the register is updated. Add one."
+}

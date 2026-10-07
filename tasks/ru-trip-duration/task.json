@@ -1,0 +1,14 @@
+{
+  "id": "ru-trip-duration",
+  "title": "One-line trip summaries",
+  "category": "reuse",
+  "split": "dev",
+  "axis": "quality",
+  "rung": 2,
+  "entry": "trips/summary.py",
+  "requirements": [],
+  "python_target": "3.12",
+  "prompt": "Implement `trip_summary(trip)` in trips/summary.py. It returns the one-line summary shown in the trip list: the origin, ' to ', the destination, ': ' and how long the trip takes, e.g. 'Leeds to York: 1 h 05 min'. Durations must look the same as everywhere else on the site.",
+  "notes": "util/timefmt.py already formats durations ('45 min', '2 h', rounding to the nearest minute). The lazy-wrong version formats its own and prints '0 h 45 min'.",
+  "extension": "Overnight trips should say so: add ' (overnight)' when the trip arrives on a later day."
+}

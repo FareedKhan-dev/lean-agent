@@ -1,0 +1,10 @@
+flowchart LR
+    %%STYLES%%
+    P["🔬 <b>a probe</b><br/>one request · a few checks"]:::grey --> G["👍 <b>good answer</b>"]:::plugin
+    P --> N["👎 <b>naive answer</b>"]:::warn
+    G --> GC{"passes?"}:::gold
+    N --> NC{"fails?"}:::gold
+    GC -- "yes" --> OK["✅ <b>the probe can say yes and no</b><br/>now ask the models"]:::plugin
+    NC -- "yes" --> OK
+    GC -- "no" --> STOP["⛔ <b>broken probe</b><br/>the notebook stops"]:::warn
+    NC -- "no" --> STOP

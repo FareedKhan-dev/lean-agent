@@ -1,0 +1,9 @@
+{
+  "candidate": "Prefer comprehensions and one-line expressions to loops.",
+  "code": -1.0,
+  "code_lo": -3.3889,
+  "code_hi": 0.7222,
+  "pass": -0.1111,
+  "golf": -0.1667,
+  "shipped": false
+}

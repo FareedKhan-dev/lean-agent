@@ -1,0 +1,63 @@
+{
+  "baseline_median_words": 73.5,
+  "baseline_within": 23,
+  "baseline_n": 34,
+  "cards": [
+    {
+      "arm": "off",
+      "task": "ob-postcode-cache",
+      "words": 100,
+      "within": false,
+      "left_out": 0
+    },
+    {
+      "arm": "rules",
+      "task": "ob-postcode-cache",
+      "words": 73,
+      "within": true,
+      "left_out": 0
+    },
+    {
+      "arm": "rules-no-read",
+      "task": "rc-day-parse",
+      "words": 46,
+      "within": true,
+      "left_out": 0
+    },
+    {
+      "arm": "rules",
+      "task": "rc-day-parse",
+      "words": 45,
+      "within": true,
+      "left_out": 0
+    },
+    {
+      "arm": "off",
+      "task": "ob-report-flags",
+      "words": 119,
+      "within": false,
+      "left_out": 0
+    },
+    {
+      "arm": "rules",
+      "task": "ob-report-flags",
+      "words": 85,
+      "within": false,
+      "left_out": 0
+    },
+    {
+      "arm": "rules-no-never-cut",
+      "task": "sf-feedback-body",
+      "words": 76,
+      "within": true,
+      "left_out": 0
+    },
+    {
+      "arm": "rules",
+      "task": "sf-feedback-body",
+      "words": 70,
+      "within": true,
+      "left_out": 0
+    }
+  ]
+}

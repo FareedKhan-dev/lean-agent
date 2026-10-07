@@ -1,0 +1,14 @@
+{
+  "id": "eg-leap-feb",
+  "title": "Add months to a lease date",
+  "category": "edge",
+  "split": "dev",
+  "axis": "correct",
+  "rung": 3,
+  "entry": "leases/dates.py",
+  "requirements": [],
+  "python_target": "3.12",
+  "prompt": "Implement `add_months(start, months)` in leases/dates.py: the date `months` calendar months after `start` (a datetime.date), for lease payment schedules. When that day does not exist in the target month, use the month's last day: 31 January plus one month is 28 February, or 29 February in a leap year. The register holds leases from 1890 onwards, and some run for 999 years.",
+  "notes": "divmod for the month arithmetic and calendar.monthrange for the month length, five lines. The lazy-wrong version keeps its own month-length table with a year % 4 leap rule, which is wrong for 1900 and 2100; the bloated version adds an end-of-month policy enum and a MonthDelta type.",
+  "extension": "Add `payment_dates(start, months, count)`: the next `count` payment dates, every `months` months from `start`."
+}

@@ -1,0 +1,15 @@
+flowchart LR
+    %%STYLES%%
+    P["🧩 <b>plugin</b><br/>Parts IV to VI"]:::plugin -. "hooks · skills<br/>commands · gates" .-> L
+    subgraph HOST["🖥️ the host · Part III"]
+        L(("🔁 <b>agent<br/>loop</b>")):::host
+        L --> M["🚪 <b>front door</b><br/>ledger · replay"]:::host
+        M --> C["📡 <b>streaming client</b><br/>retries · deadlines"]:::host
+        L --> T["🧰 <b>six tools</b><br/>path guard · fence"]:::host
+        L --> B["📣 <b>event bus</b><br/>six moments"]:::host
+        L --> X["🧠 <b>context</b><br/>one system message"]:::host
+        L --> K["📚 <b>skills · commands</b>"]:::host
+        L --> S["👥 <b>subagents · statusline</b>"]:::host
+    end
+    T --> W["📁 <b>workspace copy</b><br/>inside the fence"]:::grey
+    style HOST fill:#f7faff,stroke:#2a78d6
